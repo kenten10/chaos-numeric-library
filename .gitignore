@@ -1,0 +1,34 @@
+# Python bytecode and tooling caches
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Packaging output
+build/
+dist/
+*.egg-info/
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Experiment output is local unless an example explicitly tracks a fixture.
+results/

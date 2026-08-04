@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "platform_policy": "CPython 3.11-3.14 CI, warmup once, median of three",
+  "thresholds_seconds": {
+    "batch_trajectory": 0.5,
+    "dense_eigenanalysis": 2.0,
+    "fft_evolution": 0.5,
+    "scalar_trajectory": 2.0,
+    "ulam_build": 1.0
+  }
+}
