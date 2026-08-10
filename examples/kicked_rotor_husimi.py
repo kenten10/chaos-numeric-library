@@ -14,7 +14,7 @@ from chaos_numerics.quantum import (
 dimension = 64
 initial = coherent_state(dimension=dimension, position=0.2, momentum=0.3)
 quantum = KickedRotor(dimension=dimension, kick_strength=5.0)
-evolved = evolve(quantum, initial, steps=8, method="fft")
+evolved = evolve(quantum, initial, steps=8, method="fft").final_state
 husimi = husimi_distribution(evolved, grid_shape=(64, 64))
 
 classical = StandardMap(kick_strength=5.0)

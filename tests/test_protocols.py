@@ -16,6 +16,7 @@ from chaos_numerics.core import (
     Partition,
     QuantumMap,
 )
+from chaos_numerics.operators import UniformPartition, build_ulam
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,40 @@ def test_representative_implementations_satisfy_runtime_protocols() -> None:
     assert isinstance(LINEAR_OPERATOR, LinearOperatorLike)
     assert isinstance(QUANTUM_MAP, QuantumMap)
     assert isinstance(PARTITION, Partition)
+
+
+def test_library_ulam_matrix_satisfies_the_linear_operator_protocol() -> None:
+    """A library type conforms structurally too, not only the dummies above.
+
+    ``UlamMatrix`` was a ``csr_matrix`` subclass in earlier drafts, and SciPy
+    sparse matrices have no ``matvec``, so this ``isinstance`` used to be
+    ``False`` for the one operator the v0.1 eigensolvers are built around.
+    """
+    partition = UniformPartition(bounds=((0.0, 1.0), (0.0, 1.0)), shape=(2, 2))
+    operator = build_ulam(CLASSICAL_MAP, partition, samples_per_cell=8, seed=1)
+    static: LinearOperatorLike = operator
+
+    assert isinstance(operator, LinearOperatorLike)
+    assert static.shape == (4, 4)
+    assert static.dtype == np.dtype(np.float64)
+    np.testing.assert_allclose(static.matvec(np.ones(4)), np.ones(4))
+
+
+def test_matvec_returns_complex128_even_for_a_real_operator() -> None:
+    """Pin the one deliberate dtype asymmetry of ``LinearOperatorLike``.
+
+    ``dtype`` reports the operator's own element type and ``matvec`` reports the
+    protocol's, and for a real operator the two differ on purpose. This is the part
+    of the contract that a later move to a dtype-generic protocol would break at
+    runtime rather than only in a type checker, so it is asserted rather than
+    assumed; ``core/protocols.py`` records why ``complex128`` was kept.
+    """
+    partition = UniformPartition(bounds=((0.0, 1.0), (0.0, 1.0)), shape=(2, 2))
+    real: LinearOperatorLike = build_ulam(CLASSICAL_MAP, partition, samples_per_cell=8, seed=1)
+
+    assert real.dtype == np.dtype(np.float64)
+    for operator in (real, LINEAR_OPERATOR):
+        assert operator.matvec(np.ones(4)).dtype == np.dtype(np.complex128)
 
 
 def test_incomplete_implementation_fails_runtime_protocol() -> None:

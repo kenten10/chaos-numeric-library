@@ -16,12 +16,20 @@ from chaos_numerics.core import (
     Diagnostic,
     ExperimentMetadata,
     NumericalError,
+    NumericalWarning,
     ValidationError,
 )
-from chaos_numerics.core._validation import as_float_array
+from chaos_numerics.core._validation import as_float_array, validate_protocol
 from chaos_numerics.core.types import ArrayLike, FloatArray
 
 _MINIMUM_CONVERGENCE_STEPS = 32
+
+# Benettin's criterion for QR-based spectra: the leading direction must not
+# outgrow the trailing one by more than the float64 resolution between refreshes,
+# i.e. (lambda_1 - lambda_d) * interval <= log(1/eps). Past the squared limit the
+# trailing logarithms carry no significant digits and the result is refused.
+_CONDITION_WARNING_LIMIT = 1.0 / np.finfo(np.float64).eps
+_CONDITION_ERROR_LIMIT = _CONDITION_WARNING_LIMIT**2
 
 
 def largest_lyapunov_exponent(
@@ -37,7 +45,18 @@ def largest_lyapunov_exponent(
     seed: int | None = None,
     strict: bool = False,
 ) -> AnalysisResult:
-    """Estimate the largest exponent by periodic tangent-vector normalization."""
+    """Estimate the largest exponent by periodic tangent-vector normalization.
+
+    ``reorthogonalization_interval`` must be short enough that the tangent vector
+    stays inside the ``float64`` range between renormalizations; an interval that
+    lets it overflow raises :class:`~chaos_numerics.core.NumericalError` naming
+    the interval instead of leaking ``inf``/``nan`` into the result.
+
+    The tangent vector starts at the all-ones direction when ``seed`` is ``None``
+    and at a reproducible standard-normal draw otherwise, so a seed changes the
+    finite-time estimate as well as making it repeatable.
+    """
+    validate_protocol(model, ClassicalMap, name="model")
     config = _validate_config(
         steps=steps,
         transient=transient,
@@ -101,7 +120,22 @@ def lyapunov_spectrum(
     Only one initial state with shape ``(state_dim,)`` is accepted in v0.1. The
     returned exponents are sorted in descending order. History has shape
     ``(records, state_dim)`` and its final row exactly equals ``values``.
+
+    ``reorthogonalization_interval`` must be short enough that the propagated
+    basis stays inside the ``float64`` range between QR refreshes; an interval
+    that lets it overflow raises :class:`~chaos_numerics.core.NumericalError`
+    naming the interval instead of leaking ``inf``/``nan`` into the result.
+
+    A shorter interval than that is needed for the trailing exponents to mean
+    anything. Between refreshes the leading direction outgrows the trailing one by
+    ``exp((lambda_1 - lambda_d) * interval)``, and once that exceeds the
+    ``float64`` resolution the trailing columns are rounding noise even though the
+    QR basis remains perfectly orthogonal. The largest observed ratio is recorded
+    as ``metadata.parameters["maximum_qr_condition"]``; exceeding the resolution
+    emits :class:`~chaos_numerics.core.NumericalWarning` and exceeding its square
+    raises :class:`~chaos_numerics.core.NumericalError`.
     """
+    validate_protocol(model, ClassicalMap, name="model")
     config = _validate_config(
         steps=steps,
         transient=transient,
@@ -119,14 +153,20 @@ def lyapunov_spectrum(
         generator = np.random.default_rng(config.seed)
         basis, _ = np.linalg.qr(generator.standard_normal((dimension, dimension)))
 
-    state, basis, transient_defect = _matrix_transient(
+    state, basis, transient_defect, transient_condition = _matrix_transient(
         model,
         state,
         basis,
         steps=config.transient,
         interval=config.interval,
     )
-    values, history, window_difference, measurement_defect = _matrix_measurement(
+    (
+        values,
+        history,
+        window_difference,
+        measurement_defect,
+        measurement_condition,
+    ) = _matrix_measurement(
         model,
         state,
         basis,
@@ -134,6 +174,16 @@ def lyapunov_spectrum(
         interval=config.interval,
         history_interval=config.history_interval,
     )
+    qr_condition = max(transient_condition, measurement_condition)
+    if qr_condition > _CONDITION_WARNING_LIMIT:
+        message = (
+            f"Lyapunov QR condition reached {qr_condition:.3e}, above the float64 "
+            f"resolution {_CONDITION_WARNING_LIMIT:.3e}: the trailing exponents may have "
+            f"lost precision because the basis spread that far between refreshes. The "
+            f"standard criterion is (lambda_1 - lambda_d) * reorthogonalization_interval "
+            f"<= log(1/eps); reduce the interval (currently {config.interval})"
+        )
+        python_warnings.warn(message, NumericalWarning, stacklevel=2)
     order = np.argsort(-values)
     values = values[order]
     history = history[:, order]
@@ -146,6 +196,7 @@ def lyapunov_spectrum(
         window_difference=window_difference,
         config=config,
         orthogonality_defect=max(transient_defect, measurement_defect),
+        qr_condition=qr_condition,
     )
 
 
@@ -259,9 +310,9 @@ def _vector_transient(
 ) -> tuple[FloatArray, FloatArray, float]:
     for index in range(1, steps + 1):
         state, jacobian = _advance(model, state)
-        tangent = jacobian @ tangent
+        tangent = _propagate(jacobian, tangent)
         if index % interval == 0 or index == steps:
-            tangent /= _safe_norm(tangent, context="transient tangent vector")
+            tangent /= _safe_norm(tangent, context="transient tangent vector", interval=interval)
     return state, tangent, 0.0
 
 
@@ -272,15 +323,17 @@ def _matrix_transient(
     *,
     steps: int,
     interval: int,
-) -> tuple[FloatArray, FloatArray, float]:
+) -> tuple[FloatArray, FloatArray, float, float]:
     maximum_defect = 0.0
+    maximum_condition = 0.0
     for index in range(1, steps + 1):
         state, jacobian = _advance(model, state)
-        basis = jacobian @ basis
+        basis = _propagate(jacobian, basis)
         if index % interval == 0 or index == steps:
-            basis, _ = np.linalg.qr(basis)
+            basis, _, condition = _reorthogonalize(basis, interval=interval, context="transient")
             maximum_defect = max(maximum_defect, _orthogonality_defect(basis))
-    return state, basis, maximum_defect
+            maximum_condition = max(maximum_condition, condition)
+    return state, basis, maximum_defect, maximum_condition
 
 
 def _vector_measurement(
@@ -300,9 +353,9 @@ def _vector_measurement(
     window_start, split = _window_boundaries(steps)
     for index in range(1, steps + 1):
         state, jacobian = _advance(model, state)
-        tangent = jacobian @ tangent
+        tangent = _propagate(jacobian, tangent)
         if _is_event(index, steps=steps, interval=interval, boundaries=(window_start, split)):
-            norm = _safe_norm(tangent, context="tangent vector")
+            norm = _safe_norm(tangent, context="tangent vector", interval=interval)
             cumulative += float(np.log(norm))
             tangent /= norm
             event_count += 1
@@ -330,25 +383,26 @@ def _matrix_measurement(
     steps: int,
     interval: int,
     history_interval: int,
-) -> tuple[FloatArray, FloatArray, FloatArray, float]:
+) -> tuple[FloatArray, FloatArray, FloatArray, float, float]:
     dimension = state.size
     cumulative = np.zeros(dimension, dtype=np.float64)
     start_sum = cumulative.copy()
     split_sum = cumulative.copy()
     event_count = 0
     maximum_defect = 0.0
+    maximum_condition = 0.0
     records: list[FloatArray] = []
     window_start, split = _window_boundaries(steps)
     for index in range(1, steps + 1):
         state, jacobian = _advance(model, state)
-        basis = jacobian @ basis
+        basis = _propagate(jacobian, basis)
         if _is_event(index, steps=steps, interval=interval, boundaries=(window_start, split)):
-            basis, triangular = np.linalg.qr(basis)
-            diagonal = np.abs(np.diag(triangular))
-            if bool(np.any(diagonal <= np.finfo(np.float64).tiny)):
-                raise NumericalError("Lyapunov QR factor became singular")
+            basis, diagonal, condition = _reorthogonalize(
+                basis, interval=interval, context="measurement"
+            )
             cumulative += np.log(diagonal)
             maximum_defect = max(maximum_defect, _orthogonality_defect(basis))
+            maximum_condition = max(maximum_condition, condition)
             event_count += 1
             if index == window_start:
                 start_sum = cumulative.copy()
@@ -359,7 +413,7 @@ def _matrix_measurement(
                 records.append(estimate.copy())
     window = steps // 2
     difference = np.abs((cumulative - split_sum) / window - (split_sum - start_sum) / window)
-    return cumulative / steps, np.stack(records), difference, maximum_defect
+    return cumulative / steps, np.stack(records), difference, maximum_defect, maximum_condition
 
 
 def _result(
@@ -371,6 +425,7 @@ def _result(
     window_difference: FloatArray,
     config: _Config,
     orthogonality_defect: float | None,
+    qr_condition: float | None = None,
 ) -> AnalysisResult:
     thresholds = np.maximum(config.atol, config.rtol * np.maximum(np.abs(values), 1e-8))
     sufficiently_long = config.steps >= _MINIMUM_CONVERGENCE_STEPS
@@ -406,6 +461,9 @@ def _result(
     }
     if orthogonality_defect is not None:
         parameters["maximum_orthogonality_defect"] = orthogonality_defect
+    if qr_condition is not None:
+        parameters["maximum_qr_condition"] = qr_condition
+        parameters["qr_condition_warning_limit"] = float(_CONDITION_WARNING_LIMIT)
     convergence = ConvergenceInfo(
         converged=converged,
         iterations=config.steps,
@@ -455,11 +513,108 @@ def _orthogonality_defect(basis: FloatArray) -> float:
     return float(np.linalg.norm(basis.T @ basis - identity) / np.sqrt(basis.shape[1]))
 
 
-def _safe_norm(vector: FloatArray, *, context: str) -> float:
-    norm = float(np.linalg.norm(vector))
-    if not np.isfinite(norm) or norm <= np.finfo(np.float64).tiny:
-        raise NumericalError(f"{context} has zero or non-finite norm")
+def _propagate(jacobian: FloatArray, tangent: FloatArray) -> FloatArray:
+    """Advance a tangent vector or basis by one step without NumPy's overflow noise.
+
+    A reorthogonalization interval that is too long overflows the tangent, which is
+    detected and reported with an actionable :class:`NumericalError` a few lines
+    later. NumPy would otherwise emit a bare ``RuntimeWarning: overflow encountered
+    in matmul`` first, which says nothing about the remedy and, on NumPy 1.x, fires
+    where NumPy 2.x stays quiet. Silencing it here keeps the reported failure the
+    same on every supported version.
+    """
+    with np.errstate(over="ignore", invalid="ignore"):
+        return jacobian @ tangent
+
+
+def _reorthogonalize(
+    basis: FloatArray,
+    *,
+    interval: int,
+    context: str,
+) -> tuple[FloatArray, FloatArray, float]:
+    """Return a QR-refreshed basis, the absolute ``R`` diagonal, and its condition.
+
+    ``np.linalg.qr`` propagates an overflowed basis into ``inf``/``nan`` entries,
+    and a ``nan`` passes every ``<=`` comparison, so the singularity guard alone
+    used to let ``nan`` exponents escape into the reported result. Both the input
+    basis and the resulting diagonal are therefore checked for finiteness.
+
+    The returned condition number ``max(diag) / min(diag)`` is the diagnostic for
+    the subtler failure. Between refreshes the leading direction outgrows the
+    trailing one by ``exp((lambda_1 - lambda_d) * interval)``; once that ratio
+    passes the float64 resolution, the trailing columns are rounding noise and
+    their exponents are wrong while the basis stays perfectly orthogonal, so the
+    orthogonality defect reports nothing. Measured on the cat map, an interval of
+    40 returns ``+0.81`` for a trailing exponent whose exact value is ``-0.96``.
+    Beyond ``eps**-2`` the trailing logarithms carry no significant digits at all
+    and this raises rather than returning them.
+    """
+    if not bool(np.all(np.isfinite(basis))):
+        raise NumericalError(
+            f"Lyapunov {context} basis overflowed to a non-finite value before "
+            f"reorthogonalization: the tangent directions grew beyond the float64 range "
+            f"while propagating {interval} steps between QR refreshes. Reduce "
+            f"reorthogonalization_interval (currently {interval})"
+        )
+    basis, triangular = np.linalg.qr(basis)
+    diagonal = np.abs(np.diag(triangular))
+    if not bool(np.all(np.isfinite(diagonal))):
+        raise NumericalError(
+            f"Lyapunov {context} QR factor has non-finite diagonal entries, so the "
+            f"accumulated exponents would be nan. Reduce reorthogonalization_interval "
+            f"(currently {interval})"
+        )
+    if bool(np.any(diagonal <= np.finfo(np.float64).tiny)):
+        raise NumericalError(
+            f"Lyapunov QR factor became singular during the {context} stage: a tangent "
+            f"direction collapsed to zero length, so its exponent is undefined. If the "
+            f"dynamics are not degenerate, reduce reorthogonalization_interval "
+            f"(currently {interval})"
+        )
+    condition = float(diagonal.max() / diagonal.min())
+    if condition > _CONDITION_ERROR_LIMIT:
+        raise NumericalError(
+            f"Lyapunov QR factor is too ill-conditioned during the {context} stage to "
+            f"resolve the trailing exponents: the R diagonal spans a factor of "
+            f"{condition:.3e}, beyond the float64 limit of {_CONDITION_ERROR_LIMIT:.3e}, "
+            f"so the smaller exponents would carry no significant digits. Reduce "
+            f"reorthogonalization_interval (currently {interval})"
+        )
+    return basis, diagonal, condition
+
+
+def _safe_norm(vector: FloatArray, *, context: str, interval: int | None = None) -> float:
+    """Return a Euclidean norm computed without squaring the largest component.
+
+    ``np.linalg.norm`` sums squares, so it overflows once any component exceeds
+    about ``1e154`` even though the norm itself is representable. Scaling by the
+    largest absolute value first keeps the full exponent range available before
+    the tangent vector genuinely exceeds ``float64``.
+    """
+    tiny = np.finfo(np.float64).tiny
+    largest = float(np.max(np.abs(vector))) if vector.size else 0.0
+    if not np.isfinite(largest):
+        raise NumericalError(_overflow_message(context, interval))
+    if largest <= tiny:
+        raise NumericalError(
+            f"{context} has zero or non-finite norm: the tangent collapsed to a zero "
+            f"vector, so no growth direction remains"
+        )
+    norm = largest * float(np.linalg.norm(vector / largest))
+    if not np.isfinite(norm) or norm <= tiny:
+        raise NumericalError(_overflow_message(context, interval))
     return norm
+
+
+def _overflow_message(context: str, interval: int | None) -> str:
+    remedy = "Reduce reorthogonalization_interval" + (
+        "" if interval is None else f" (currently {interval})"
+    )
+    return (
+        f"{context} is no longer finite: it grew beyond the float64 range before being "
+        f"renormalized, so its growth rate cannot be measured. {remedy}"
+    )
 
 
 def _positive_int(value: object, *, name: str) -> int:

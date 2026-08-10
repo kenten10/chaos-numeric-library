@@ -1,7 +1,9 @@
-"""Two-dimensional classical maps on the half-open unit torus.
+"""Classical maps on the half-open unit torus and the half-open unit interval.
 
-States use coordinate order ``(q, p)`` and shape ``(..., 2)``. Every step first
-wraps both coordinates into ``[0, 1)`` and returns a canonical ``float64`` array.
+Two-dimensional maps use coordinate order ``(q, p)`` and shape ``(..., 2)``; each
+step wraps both coordinates into ``[0, 1)`` and returns a canonical ``float64``
+array. The one-dimensional :class:`LogisticMap` uses shape ``(..., 1)`` on the
+non-periodic interval ``[0, 1)``.
 """
 
 from __future__ import annotations
@@ -11,13 +13,19 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from chaos_numerics.core._validation import as_float_array
+from chaos_numerics.core._validation import as_float_array, wrap_into_half_open
 from chaos_numerics.core.exceptions import ValidationError
 from chaos_numerics.core.types import ArrayLike, FloatArray
 
 _BOUNDS = ((0.0, 1.0), (0.0, 1.0))
 _PERIODIC = (True, True)
 _TWO_PI = 2.0 * math.pi
+
+_INTERVAL_BOUNDS = ((0.0, 1.0),)
+_INTERVAL_PERIODIC = (False,)
+_MAXIMUM_RATE = 4.0
+# The largest float64 strictly below the excluded upper bound 1.0.
+_BELOW_ONE = float(np.nextafter(1.0, 0.0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,9 +67,8 @@ class StandardMap:
         points = _states(state)
         q = points[..., 0]
         p = points[..., 1]
-        next_p = np.mod(p + (self.kick_strength / _TWO_PI) * np.sin(_TWO_PI * q), 1.0)
-        next_q = np.mod(q + next_p, 1.0)
-        return _coordinates(next_q, next_p)
+        next_p = _wrap_unit_torus(p + (self.kick_strength / _TWO_PI) * np.sin(_TWO_PI * q))
+        return _coordinates(q + next_p, next_p)
 
     def jacobian(self, state: ArrayLike, /) -> FloatArray:
         points = _states(state)
@@ -109,7 +116,7 @@ class CatMap:
     def step(self, state: ArrayLike, /) -> FloatArray:
         points = _states(state)
         matrix = np.asarray(self.matrix, dtype=np.float64)
-        return np.mod(points @ matrix.T, 1.0)
+        return _wrap_unit_torus(points @ matrix.T)
 
     def jacobian(self, state: ArrayLike, /) -> FloatArray:
         points = _states(state)
@@ -172,15 +179,118 @@ class BakerMap:
         return result
 
 
+@dataclass(frozen=True, slots=True)
+class LogisticMap:
+    """Logistic map ``x -> rate * x * (1 - x)`` on the half-open interval ``[0, 1)``.
+
+    The default ``rate=4`` is the surjective (fully developed) case whose unique
+    absolutely continuous invariant measure is the arcsine law with density
+    ``1 / (pi * sqrt(x * (1 - x)))``; it is smoothly conjugate to the angle
+    doubling map through ``x = sin(pi * theta / 2)**2``, so its Lyapunov exponent
+    is exactly ``log 2``. Lowering ``rate`` walks the period-doubling cascade
+    backwards, which makes this the standard bifurcation-diagram model.
+
+    Notes
+    -----
+    ``rate=4`` sends the single point ``x = 1/2`` to exactly ``1.0``, the excluded
+    endpoint of the ``bounds`` contract, so the raw image is pushed down to
+    ``nextafter(1.0, 0.0)`` with :func:`numpy.minimum`. Every other map in this
+    module keeps its images inside the documented half-open bounds, and code that
+    consumes ``bounds`` -- partition location, Ulam matrices, trajectory
+    normalization -- relies on that. Clamping is safe here because the affected
+    preimages form a Lebesgue-null set: ``{1/2}`` for one step, and its finitely
+    many preimages for any finite number of steps, so no invariant measure and no
+    Monte Carlo average sees the change. Clamping is *not* a way to hide a
+    genuinely escaping orbit: ``rate > 4`` maps a neighbourhood of ``1/2`` of
+    positive measure outside ``[0, 1]``, which is why the constructor rejects it
+    rather than clamping it.
+
+    ``step`` and ``jacobian`` evaluate the polynomial for any finite input and only
+    guarantee an image inside ``[0, 1)`` for a state inside ``bounds``. Rejecting
+    out-of-domain states here would make the map unusable with the derivative-free
+    root solver behind :func:`~chaos_numerics.classical.find_periodic_orbits`,
+    which probes a rounding error either side of a fixed point at ``x = 0``. The
+    domain is enforced where a state enters an experiment instead:
+    :func:`~chaos_numerics.classical.iterate` rejects an initial state outside the
+    non-periodic bounds, and partitions reject points outside their edges.
+    """
+
+    rate: float = _MAXIMUM_RATE
+
+    def __post_init__(self) -> None:
+        rate = _finite_real(self.rate, name="rate")
+        if not 0.0 < rate <= _MAXIMUM_RATE:
+            raise ValidationError(
+                f"rate must satisfy 0 < rate <= {_MAXIMUM_RATE}; got {rate}. Rates above "
+                f"{_MAXIMUM_RATE} send a positive-measure neighbourhood of x = 1/2 outside "
+                "the unit interval, so the map no longer acts on its documented bounds"
+            )
+        object.__setattr__(self, "rate", rate)
+
+    @property
+    def state_dim(self) -> int:
+        return 1
+
+    @property
+    def is_periodic(self) -> tuple[bool]:
+        return _INTERVAL_PERIODIC
+
+    @property
+    def bounds(self) -> tuple[tuple[float, float]]:
+        return _INTERVAL_BOUNDS
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        """JSON-compatible model parameters for result metadata."""
+        return {"rate": self.rate}
+
+    def step(self, state: ArrayLike, /) -> FloatArray:
+        points = _interval_states(state)
+        image = self.rate * points * (1.0 - points)
+        return np.minimum(image, _BELOW_ONE)
+
+    def jacobian(self, state: ArrayLike, /) -> FloatArray:
+        points = _interval_states(state)
+        result = np.empty((*points.shape[:-1], 1, 1), dtype=np.float64)
+        result[..., 0, 0] = self.rate * (1.0 - 2.0 * points[..., 0])
+        return result
+
+
 def _states(state: ArrayLike) -> FloatArray:
-    points = as_float_array(state, name="state", trailing_dim=2, copy=True)
-    return np.mod(points, 1.0)
+    """Validate ``(..., 2)`` torus states and reduce them into ``[0, 1)``.
+
+    ``copy=False`` is safe even though ``as_float_array`` may then hand back the
+    caller's own array: :func:`_wrap_unit_torus` allocates its result, and nothing
+    downstream writes through this reference, so no input is ever mutated in place.
+    Copying here cost one allocation per step of every trajectory.
+    """
+    return _wrap_unit_torus(as_float_array(state, name="state", trailing_dim=2))
+
+
+def _interval_states(state: ArrayLike) -> FloatArray:
+    """Validate the shape of ``(..., 1)`` states on the unit interval.
+
+    The coordinate is non-periodic, so there is no reduction to apply the way the
+    torus maps reduce theirs; the value itself is left alone. See
+    :class:`LogisticMap` for why an out-of-domain value is evaluated rather than
+    rejected.
+    """
+    return as_float_array(state, name="state", trailing_dim=1)
+
+
+def _wrap_unit_torus(values: FloatArray) -> FloatArray:
+    """Reduce torus coordinates into the documented half-open ``[0, 1)`` bounds.
+
+    ``np.mod`` alone is not enough: ``np.mod(-1e-17, 1.0)`` rounds up to exactly
+    ``1.0``, which is the excluded endpoint of the ``bounds`` contract.
+    """
+    return wrap_into_half_open(values, lower=0.0, upper=1.0)
 
 
 def _coordinates(q: FloatArray, p: FloatArray) -> FloatArray:
     result = np.empty((*q.shape, 2), dtype=np.float64)
-    result[..., 0] = q
-    result[..., 1] = p
+    result[..., 0] = _wrap_unit_torus(q)
+    result[..., 1] = _wrap_unit_torus(p)
     return result
 
 
@@ -213,4 +323,4 @@ def _integer_matrix(value: object) -> tuple[tuple[int, int], tuple[int, int]]:
     )
 
 
-__all__ = ["BakerMap", "CatMap", "StandardMap"]
+__all__ = ["BakerMap", "CatMap", "LogisticMap", "StandardMap"]

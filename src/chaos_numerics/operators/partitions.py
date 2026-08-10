@@ -8,9 +8,14 @@ from typing import Any
 
 import numpy as np
 
-from chaos_numerics.core._validation import as_float_array, validate_bounds, validate_shape
+from chaos_numerics.core._validation import (
+    as_float_array,
+    validate_bounds,
+    validate_shape,
+    wrap_into_half_open,
+)
 from chaos_numerics.core.exceptions import ValidationError
-from chaos_numerics.core.types import ArrayLike, FloatArray, IndexArray
+from chaos_numerics.core.types import ArrayLike, BoolArray, FloatArray, IndexArray
 
 
 @dataclass(frozen=True, slots=True, eq=False, init=False)
@@ -54,7 +59,14 @@ class RectangularPartition:
         return tuple((float(edge[0]), float(edge[-1])) for edge in self.edges)
 
     def locate(self, points: ArrayLike, /) -> IndexArray:
-        """Locate scalar or batched points and return C-order flat indices."""
+        """Locate scalar or batched points and return C-order flat indices.
+
+        Periodic coordinates are reduced with
+        :func:`~chaos_numerics.core._validation.wrap_into_half_open` rather than
+        with a bare ``np.mod``, because ``np.mod(-1e-17, 1.0)`` rounds up to
+        exactly ``1.0`` and would place a point a rounding error below the lower
+        edge outside the partition.
+        """
         values = as_float_array(points, name="points", trailing_dim=self.ndim, copy=True)
         multi = np.empty(values.shape, dtype=np.intp)
         for coordinate, (edge, periodic) in enumerate(zip(self.edges, self.periodic, strict=True)):
@@ -62,7 +74,11 @@ class RectangularPartition:
             upper = edge[-1]
             coordinate_values = values[..., coordinate]
             if periodic:
-                coordinate_values = lower + np.mod(coordinate_values - lower, upper - lower)
+                coordinate_values = wrap_into_half_open(
+                    coordinate_values,
+                    lower=float(lower),
+                    upper=float(upper),
+                )
             elif bool(np.any((coordinate_values < lower) | (coordinate_values >= upper))):
                 raise ValidationError(
                     f"points coordinate {coordinate} must lie in [{lower}, {upper})"
@@ -70,6 +86,29 @@ class RectangularPartition:
             indices = np.searchsorted(edge, coordinate_values, side="right") - 1
             multi[..., coordinate] = indices.astype(np.intp, copy=False)
         return self.ravel_index(multi)
+
+    def _inside_mask(self, points: FloatArray) -> BoolArray:
+        """Return which rows of a ``(count, ndim)`` batch :meth:`locate` accepts.
+
+        :meth:`locate` raises on the first out-of-domain coordinate it sees, which
+        is right for a caller that treats an escape as an error but forces a
+        caller that must *count* escapes into a per-point loop. This is the
+        vectorized form of exactly the same admission test, so
+        ``partition.locate(points[partition._inside_mask(points)])`` returns for
+        the accepted rows precisely what per-point calls would have returned, bit
+        for bit. It lives next to :meth:`locate` so the two cannot drift apart;
+        :func:`~chaos_numerics.operators.build_ulam` is its only caller.
+        """
+        # A non-finite coordinate is rejected by ``as_float_array`` inside
+        # ``locate`` regardless of periodicity, so it counts as outside here.
+        mask = np.all(np.isfinite(points), axis=-1)
+        for coordinate, (edge, periodic) in enumerate(zip(self.edges, self.periodic, strict=True)):
+            if periodic:
+                # wrap_into_half_open lands every finite value inside the domain.
+                continue
+            column = points[..., coordinate]
+            mask &= (column >= edge[0]) & (column < edge[-1])
+        return mask
 
     def ravel_index(self, multi_index: ArrayLike, /) -> IndexArray:
         """Convert ``(..., ndim)`` multi-indices to C-order flat indices."""
@@ -182,7 +221,8 @@ def _index_array(value: ArrayLike, *, name: str) -> IndexArray:
         raw = np.asarray(value)
     except (TypeError, ValueError) as error:
         raise ValidationError(f"{name} could not be converted to an integer array") from error
-    if raw.dtype.kind not in "iu" or raw.dtype.kind == "b":
+    # Booleans have kind "b" and are already rejected by the membership test.
+    if raw.dtype.kind not in "iu":
         raise ValidationError(f"{name} must contain integers; got dtype {raw.dtype}")
     if raw.dtype.kind == "u" and bool(np.any(raw > np.iinfo(np.intp).max)):
         raise ValidationError(f"{name} entries must fit in np.intp")

@@ -45,10 +45,12 @@ a separate design and implementation issue.
 | Standard map | **v0.1** | Scalar and batch stepping/iteration, Jacobian, parameter checks, periodic coordinates. |
 | Cat map | **v0.1** | Two-dimensional torus map with integer-matrix and determinant validation. |
 | Baker map | **v0.1** | Two-dimensional piecewise map with an explicit branch-boundary convention. |
+| Logistic map | **v0.1** | One-dimensional map, so that the one-dimensional partition and Ulam paths have a built-in model to exercise them. |
 | Trajectory generation | **v0.1** | Single and batched initial states with consistent output shapes. |
 | Lyapunov analysis | **v0.1** | Largest exponent and QR-based spectrum, transient controls, finite-time history, convergence diagnostics. |
 | Correlation and transport | **v0.1** | Autocorrelation, mean-square displacement, and local diffusion exponent with explicit observables and fit windows. |
 | Low-period orbits | **v0.1** | Root-finding search, residuals, monodromy matrices, and stability multipliers. |
+| Stroboscopic sections | **v0.1** | `poincare_section` flattens iterated states onto chosen coordinates with recorded seeds. This is the section of a discrete map; locating where a continuous-time trajectory crosses a surface stays out of scope with the rest of ODE integration. |
 
 ### 3.3 Transfer operators and Ulam approximation
 
@@ -70,7 +72,11 @@ exact Perron–Frobenius/Koopman operator algebra is not implied.
 | Kicked rotor | **v0.1** | Finite torus quantization, a dense reference Floquet matrix, and split-operator/FFT evolution. |
 | Quantum cat map | **v0.1** | Supported quantizable matrices and boundary phases with explicit rejection of invalid conditions. |
 | Quantum baker map | **v0.1** | One documented finite-dimensional quantization and boundary convention. |
-| Quantum diagnostics | **v0.1** | Norm/unitarity errors, eigenphases/eigenstates, residuals, degeneracy and symmetry warnings. |
+| Cylinder kicked rotor | **v0.1** | Momentum-basis quantization whose effective Planck constant is independent of the basis size, which is what dynamical localization requires. |
+| Basis transforms | **v0.1** | Public twisted position/momentum transforms and momentum grids on both rotors, so that a momentum-space figure does not require reimplementing the boundary-phase convention. |
+| Symmetry resolution | **v0.1** | Published reflection operators where they commute exactly, and `desymmetrize` to project a spectrum onto one sector before it is compared with a random-matrix ensemble. |
+| Quantum diagnostics | **v0.1** | Norm/unitarity errors, eigenphases/eigenstates, residuals, degeneracy and symmetry warnings. Evolution returns a `QuantumEvolution` whose shape does not depend on its arguments and which carries the route that ran and the norm audit. |
+| Instability diagnostics | **v0.1** | Loschmidt echo between two whole models and the out-of-time-order correlator on Weyl translation pairs, both unclipped so that numerical drift and operator-boundedness saturation stay visible. Fitting a quantum Lyapunov exponent from them is not promised: the reported rate is the order-2 generalized exponent and the Ehrenfest window is short at the dimensions this library reaches. |
 
 Version 0.1 need not expose every quantization found in the literature. Each model
 must name and test the convention it implements.
@@ -81,21 +87,21 @@ must name and test the convention it implements.
 | --- | --- | --- |
 | Eigenphase preparation | **v0.1** | Circular sorting/wrapping, endpoint spacing, degeneracy diagnosis, and preservation of source data. |
 | Unfolding and spacing statistics | **v0.1** | Explicitly selected unfolding, spacing distributions, and adjacent-gap ratios with small-sample handling. |
-| Long-range spectral statistics | **v0.1** | Spectral form factor and number variance with stated normalization, windows, averaging, and uncertainty. |
-| Random-matrix references | **v0.1** | Reproducible Poisson, GOE, GUE, and CUE theory or numerical reference data. |
-| Phase-space state analysis | **v0.1** | Periodized torus coherent states, normalized Husimi data, IPR, participation ratio, and Shannon entropy. |
+| Long-range spectral statistics | **v0.1** | Spectral form factor, number variance, and Dyson-Mehta spectral rigidity with stated normalization, windows, averaging, and uncertainty. Reported uncertainties are calibrated against realization scatter, not against an assumption of independent samples. |
+| Random-matrix references | **v0.1** | Reproducible Poisson, GOE, COE, GUE, CUE, GSE, and CSE reference data for the form factor, number variance, spectral rigidity, spacing distribution, and gap-ratio distribution, plus the mean gap ratio in both its large-`N` and surmise forms. `beta = 4` is reference-only: no model in this library produces GSE statistics, which the entry points state rather than leaving to be discovered from a curve that will not fit. |
+| Phase-space state analysis | **v0.1** | Periodized torus coherent states, normalized Husimi data, the Wigner distribution with exact marginals, IPR, participation ratio, and Shannon entropy. |
 | Classical/quantum comparison data | **v0.1** | Data suitable for overlaying classical trajectories and quantum phase-space densities; plotting is separate from core numerics. |
 
 ### 3.6 Experiments, persistence, quality, and distribution
 
 | Capability | Scope | v0.1 boundary |
 | --- | --- | --- |
-| Experiment execution | **v0.1** | Single runs plus Cartesian-product and zip parameter sweeps. |
+| Experiment execution | **v0.1** | Single runs plus Cartesian-product and zip parameter sweeps, over classical and quantum built-in models alike. A Bloch-phase ensemble average, which the spectral form factor needs, is a sweep and runs as one. |
 | Robust sweeps | **v0.1** | Deterministic derived seeds, progress records, continue-on-failure, and restart of incomplete work. |
 | Result persistence | **v0.1** | JSON metadata separated from NPZ arrays; large arrays are never embedded in JSON. |
 | Optional Zarr storage | **Future** | Considered for larger-than-memory or chunked data after the minimal format is stable. |
 | Verification | **v0.1** | Unit, property, integration, numerical-reference, and executable-documentation tests. |
-| Benchmarks | **v0.1** | Scalar/batch trajectories, Ulam construction, FFT evolution, and eigenanalysis with stated regression thresholds. |
+| Benchmarks | **v0.1** | Scalar/batch trajectories, Ulam construction, FFT evolution, dense and sparse eigenanalysis. Peak-allocation and scaling gates block on every runner; timing is compared only within one runner class and blocks only on a pinned machine. |
 | Documentation and packaging | **v0.1** | Quick start, tutorials, API reference, changelog, license/citation guidance, wheel and sdist, and TestPyPI validation. |
 
 ## 4. Future candidates
@@ -107,19 +113,20 @@ extension points such as protocols and optional dependencies.
 | --- | --- | --- |
 | General Perron–Frobenius and Koopman methods beyond Ulam | **Future** | Requires separate choices for bases, estimators, observables, and convergence guarantees. |
 | Adaptive and higher-dimensional partitions | **Future** | Depends on demonstrated limits of uniform/rectangular partitions. |
-| Additional classical and quantum maps | **Future** | v0.1 validates the API with three canonical examples in each domain. |
-| Additional quantization conventions and symmetry-sector tooling | **Future** | Requires model-specific design and validation data. |
+| Additional classical and quantum maps | **Future** | v0.1 validates the API with the canonical examples in each domain listed in section 3; a model enters only with its convention named and tested. |
+| Additional quantization conventions | **Future** | Requires model-specific design and validation data. Sector projection itself shipped in v0.1 as `desymmetrize`; what remains future is supporting quantizations the library does not implement. |
 | Advanced periodic-orbit methods and semiclassical formulas | **Future** | The v0.1 low-period search and comparison data are foundations, not a full semiclassical package. |
 | Alternative persistence backends such as Zarr | **Future** | NPZ plus JSON is sufficient for the minimal interoperable release. |
 | Numba acceleration | **Future** | Optional optimization only after NumPy/SciPy correctness and benchmarks are stable. |
 | JAX and CuPy backends | **Future** | Backend abstraction and device semantics are not part of the v0.1 compatibility contract. |
+| Continuous-time flows and ODE integration | **Future (named v0.2 candidate)** | Deliberately deferred rather than left open. Section 5 states the v0.1 boundary; what makes this the first v0.2 candidate is that the extension point already exists and is the only unimplemented protocol in `core`. Entry criteria: a design document first, because the open questions are policy rather than code — which integrator family and error control, whether the variational equations are integrated alongside the state or by finite differences, and how event detection interacts with a fixed output grid. None of those can be settled by writing the solver. Nothing in v0.1 should be reshaped for it: `core.Flow` is the extension point, and `classical.poincare_section` stays the stroboscopic section of a discrete map. |
 
 ## 5. Explicitly out of scope for v0.1
 
 | Capability | Scope | Boundary |
 | --- | --- | --- |
 | Billiards | **Out of scope** | No collision geometry, event location, or boundary reflection API. |
-| Continuous-time flows and ODE integration | **Out of scope** | No concrete flow models, integrators, variational ODE solvers, or Poincare-section machinery. A minimal shared `Flow` protocol required by KEN-112 is an interoperability contract, not functional support. |
+| Continuous-time flows and ODE integration | **Out of scope** | No concrete flow models, integrators, variational ODE solvers, or surface-of-section machinery for a flow: locating where a trajectory crosses a section requires event detection inside the integrator, which is the part that is out of scope. The stroboscopic section of a discrete map is a different thing and `classical.poincare_section` provides it in v0.1. A minimal shared `Flow` protocol required by KEN-112 is an interoperability contract, not functional support. Named as the first v0.2 candidate in section 4. |
 | Quantum graphs | **Out of scope** | No graph scattering or secular-equation API. |
 | Many-body systems | **Out of scope** | No tensor-product Hilbert spaces, spin chains, or many-body eigensolvers. |
 | GPU execution | **Out of scope** | No GPU performance or device-array compatibility claim. |
@@ -137,7 +144,9 @@ later project from proposing these capabilities.
    context-free scalar.
 3. As a transport researcher, I can compute autocorrelation, mean-square
    displacement, and a local diffusion exponent while explicitly selecting the
-   observable and fit interval.
+   observable and fit interval, and I get a calibrated error bar from an ensemble
+   or an explicit `None` and a warning from a single trajectory, never a number
+   derived from correlated samples.
 4. As an operator-theory user, I can build a seeded sparse Ulam approximation,
    verify probability conservation, and obtain leading eigenpairs, residuals, an
    invariant density, and a spectral gap.
@@ -173,10 +182,20 @@ from chaos_numerics.classical import StandardMap, iterate, lyapunov_spectrum
 
 model = StandardMap(kick_strength=5.0)
 trajectory = iterate(model, initial_state=np.array([0.1, 0.2]), steps=10_000)
-result = lyapunov_spectrum(model, trajectory.initial_state, steps=10_000, seed=7)
+# `convergence_rtol` is matched to the run length; see the Lyapunov section of
+# docs/design/numerical-standards.md for why the default is out of reach here.
+result = lyapunov_spectrum(
+    model, trajectory.initial_state, steps=10_000, seed=7, convergence_rtol=5e-2
+)
 
-print(result.values, result.residuals, result.warnings)
+print(result.values, result.residuals, result.metadata.warnings)
+print(result.metadata.convergence.converged, result.metadata.convergence.residual)
 ```
+
+Diagnostics live on `result.metadata`, not on the result container itself. The
+standard map does not reach the default `convergence_rtol` at any practical step
+count, so this example reports `converged=False`; that is a property of the model,
+not a failure of the estimator.
 
 ### 7.2 Sparse Ulam approximation
 
@@ -195,18 +214,29 @@ print(spectrum.eigenvalues, spectrum.residuals)
 ### 7.3 Matrix-free kicked-rotor evolution
 
 ```python
-from chaos_numerics.quantum import KickedRotor, basis_state, evolve
+import numpy as np
 
-model = KickedRotor(dimension=4096, kick_strength=8.0, boundary_phase=0.0)
+from chaos_numerics.quantum import KickedRotor, basis_state, evolve, unitarity_defect
+
+model = KickedRotor(dimension=4096, kick_strength=8.0, boundary_phases=0.0)
 state = basis_state(dimension=model.dimension, index=0)
 evolved = evolve(model, state, steps=100, method="fft")
 
-print(evolved.norm_error, evolved.metadata)
+# `evolve` returns a `QuantumEvolution`: `final_state` is always present and
+# `history` is `None` unless it was asked for, so the return type does not change
+# with the arguments. Norm conservation is enforced during evolution rather than
+# reported afterwards -- exceeding `norm_tolerance` raises `NumericalError`
+# instead of returning a degraded state.
+print(evolved.final_state.shape, abs(np.linalg.norm(evolved.final_state) - 1.0))
+print(unitarity_defect(KickedRotor(dimension=64, kick_strength=8.0)))
 ```
 
 ### 7.4 Spectral statistics
 
 ```python
+import numpy as np
+
+from chaos_numerics.quantum import BoundaryPhases, KickedRotor, eigenstates
 from chaos_numerics.spectral import (
     adjacent_gap_ratios,
     prepare_eigenphases,
@@ -214,14 +244,19 @@ from chaos_numerics.spectral import (
     unfold,
 )
 
-prepared = prepare_eigenphases(raw_phases, symmetry_sector="even")
-unfolded = unfold(prepared, method="polynomial")
+rotor = KickedRotor(128, 10.0, BoundaryPhases(position=0.25, momentum=0.13))
+raw_phases = eigenstates(rotor).eigenphases
+times = np.linspace(0.0, 2.0, 101)
+
+prepared = prepare_eigenphases(raw_phases, symmetry_sector="parity and time reversal broken")
+unfolded = unfold(prepared, method="mean")
 ratios = adjacent_gap_ratios(unfolded)
 form_factor = spectral_form_factor(unfolded, times, window="hann", bootstrap=500, seed=7)
 ```
 
 ### 7.5 Reproducible parameter sweep
 
+<!-- docs-test: skip - writes a sweep directory to the filesystem -->
 ```python
 from chaos_numerics.experiment import Experiment, cartesian_grid, run_sweep
 
@@ -232,7 +267,7 @@ sweep = run_sweep(
         kick_strength=[0.5, 1.0, 5.0],
         steps=[1_000, 10_000],
     ),
-    output="results/standard-map",
+    output="results/mvp-scope-standard-map",
     resume=True,
 )
 ```

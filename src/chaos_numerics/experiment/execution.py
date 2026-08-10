@@ -1,4 +1,35 @@
-"""Experiment execution, deterministic sweeps, and minimal NPZ/JSON storage."""
+"""Experiment execution, deterministic sweeps, and minimal NPZ/JSON storage.
+
+The built-in registry covers two model families and the analyses that apply to
+each. ``_CLASSICAL_MODELS`` take the classical analyses, ``_QUANTUM_MODELS`` the
+quantum ones, and crossing the two is refused with a message that says so rather
+than with a bare "unknown analysis".
+
+Quantum spectral statistics are a *chain*, not a single call: the model is
+diagonalized, optionally split into a parity sector, prepared as circular
+eigenphases, unfolded, and only then reduced to a curve. ``_execute_quantum``
+runs that chain and takes every stage's knobs from ``Experiment.parameters``, so
+that the sweep -- not a hand-written loop in a notebook -- is what averages a
+Bloch-phase ensemble of spectral form factors.
+
+Two conventions are worth stating up front because they are what makes the
+quantum registry usable from a JSON parameter grid:
+
+``boundary_phases``
+    :class:`~chaos_numerics.quantum.BoundaryPhases` is not JSON, so the
+    parameter accepts a scalar, a ``[position, momentum]`` pair, or a
+    ``{"position": ..., "momentum": ...}`` mapping. See
+    :func:`_as_boundary_phases`.
+
+``symmetry_sector``
+    Omitting it makes :func:`~chaos_numerics.spectral.prepare_eigenphases` warn
+    with :class:`~chaos_numerics.core.NumericalWarning`, and the sweep lets that
+    warning through untouched: comparing an unresolved spectrum with RMT is a
+    real mistake, and swallowing the diagnostic inside the framework would hide
+    it exactly where it is hardest to notice. The diagnostic is also carried in
+    the persisted ``metadata.warnings`` of every affected result. Passing
+    ``parity_sector`` supplies the label automatically.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +49,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias, cast
 
 import numpy as np
+import scipy  # type: ignore[import-untyped]
 
 from chaos_numerics._version import __version__
 from chaos_numerics.classical import (
@@ -35,18 +67,44 @@ from chaos_numerics.core import (
     Diagnostic,
     EigenstateResult,
     ExperimentMetadata,
+    NumericalWarning,
+    QuantumMap,
     ReproducibilityWarning,
     Spectrum,
     Trajectory,
     ValidationError,
 )
+from chaos_numerics.core._payload import SCHEMA_VERSION
 from chaos_numerics.core.types import ArrayLike, ComplexArray, FloatArray
 from chaos_numerics.experiment.config import Experiment
 from chaos_numerics.operators import UniformPartition, build_ulam, stationary_density
+from chaos_numerics.quantum import (
+    DEFAULT_DENSE_LIMIT,
+    BoundaryPhases,
+    CylinderKickedRotor,
+    KickedRotor,
+    QuantumBakerMap,
+    QuantumCatMap,
+    SymmetrySector,
+    desymmetrize,
+    eigenstates,
+)
+from chaos_numerics.spectral import (
+    SpectralCurve,
+    UnfoldedSpectrum,
+    Window,
+    number_variance,
+    prepare_eigenphases,
+    spectral_form_factor,
+    unfold,
+)
 
-Result: TypeAlias = Trajectory | Spectrum | EigenstateResult | AnalysisResult
+Result: TypeAlias = Trajectory | Spectrum | EigenstateResult | AnalysisResult | SpectralCurve
 RunStatus: TypeAlias = Literal["success", "failed"]
-_SCHEMA_VERSION = 1
+_UnfoldMethod: TypeAlias = Literal["mean", "polynomial"]
+# The run metadata embeds the result descriptor produced by
+# ``core._payload.metadata_payload`` and validates both against one number, so the
+# on-disk layout has exactly one version and it is defined there.
 _SEED_DERIVATION = "sha256-v1"
 _MAX_METADATA_BYTES = 8 * 1024 * 1024
 _MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
@@ -56,6 +114,28 @@ _MAX_ARRAY_DIMENSIONS = 32
 _MAX_NPY_HEADER_BYTES = 16 * 1024
 _MAX_JSON_NESTING = 64
 _ALLOWED_PERSISTED_DTYPES = {np.dtype("float64"), np.dtype("complex128")}
+_CLASSICAL_MODELS: tuple[str, ...] = ("baker_map", "cat_map", "standard_map")
+_QUANTUM_MODELS: tuple[str, ...] = (
+    "cylinder_kicked_rotor",
+    "kicked_rotor",
+    "quantum_baker_map",
+    "quantum_cat_map",
+)
+_EXPERIMENT_MODELS: tuple[str, ...] = tuple(sorted(_CLASSICAL_MODELS + _QUANTUM_MODELS))
+_CLASSICAL_ANALYSES: tuple[str, ...] = (
+    "iterate",
+    "largest_lyapunov_exponent",
+    "lyapunov_spectrum",
+    "trajectory",
+    "ulam_stationary_density",
+)
+_QUANTUM_ANALYSES: tuple[str, ...] = (
+    "eigenphases",
+    "eigenstates",
+    "number_variance",
+    "spectral_form_factor",
+)
+_EXPERIMENT_ANALYSES: tuple[str, ...] = tuple(sorted(_CLASSICAL_ANALYSES + _QUANTUM_ANALYSES))
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +341,18 @@ def load_result(path: str | os.PathLike[str]) -> ExperimentRun:
 def _execute(
     model_name: str, analysis: str, parameters: Mapping[str, object], seed: int | None
 ) -> Result:
-    values = dict(parameters)
+    if model_name in _CLASSICAL_MODELS:
+        return _execute_classical(model_name, analysis, dict(parameters), seed)
+    if model_name in _QUANTUM_MODELS:
+        return _execute_quantum(model_name, analysis, dict(parameters), seed)
+    raise ValidationError(
+        f"unknown experiment model {model_name!r}; expected one of {_names(_EXPERIMENT_MODELS)}"
+    )
+
+
+def _execute_classical(
+    model_name: str, analysis: str, values: dict[str, object], seed: int | None
+) -> Result:
     model: ClassicalMap
     if model_name == "standard_map":
         model = StandardMap(
@@ -269,10 +360,8 @@ def _execute(
         )
     elif model_name == "cat_map":
         model = CatMap(matrix=_as_matrix(values.pop("matrix", ((2, 1), (1, 1)))))
-    elif model_name == "baker_map":
-        model = BakerMap(cut=_as_float(values.pop("cut", 0.5), name="cut"))
     else:
-        raise ValidationError(f"unknown experiment model {model_name!r}")
+        model = BakerMap(cut=_as_float(values.pop("cut", 0.5), name="cut"))
 
     if analysis in {"iterate", "trajectory"}:
         initial = _as_array_like(values.pop("initial_state", (0.1, 0.2)), name="initial_state")
@@ -321,7 +410,209 @@ def _execute(
         partition = UniformPartition(model.bounds, partition_shape, periodic=model.is_periodic)
         operator = build_ulam(model, partition, samples_per_cell=samples, seed=seed)
         return stationary_density(operator, tolerance=tolerance, strict=strict)
-    raise ValidationError(f"unknown experiment analysis {analysis!r}")
+    raise _unsupported_analysis(model_name, analysis, family="classical")
+
+
+def _execute_quantum(
+    model_name: str, analysis: str, values: dict[str, object], seed: int | None
+) -> Result:
+    """Diagonalize a quantum map and reduce it to the requested result.
+
+    Every analysis here starts from :func:`~chaos_numerics.quantum.eigenstates`,
+    because the residual diagnostics that the persisted metadata carries are a
+    by-product of the eigenvectors; there is no eigenvalue-only fast path in the
+    library and there is none here either.
+
+    The two ``SpectralCurve`` analyses then run the rest of the chain --
+    optional :func:`~chaos_numerics.quantum.desymmetrize`, then
+    :func:`~chaos_numerics.spectral.prepare_eigenphases`, then
+    :func:`~chaos_numerics.spectral.unfold` -- so that a caller who wants an
+    ensemble-averaged form factor only has to vary ``boundary_phases`` across a
+    grid. Parameters, all optional unless marked:
+
+    ``dimension`` (required)
+        Hilbert-space dimension. ``quantum_cat_map`` and ``quantum_baker_map``
+        require it to be even.
+    ``kick_strength``, ``effective_hbar``, ``matrix``, ``boundary_phases``
+        Model constructor arguments, spelled exactly as the classes spell them.
+        ``boundary_phases`` uses the JSON encodings of
+        :func:`_as_boundary_phases`.
+    ``dense_limit``
+        Guard on ``O(N**2)`` densification, defaulting to
+        :data:`~chaos_numerics.quantum.DEFAULT_DENSE_LIMIT`. It is *not* raised
+        to ``dimension`` automatically: a sweep that silently densifies a
+        4096-dimensional model is exactly what the guard exists to prevent.
+    ``parity_sector``
+        ``"even"`` or ``"odd"`` to keep one block of the model's parity
+        symmetry. Required for any comparison with RMT on a model that still has
+        parity -- the baker map and the cat map always do, the kicked rotor does
+        for ``alpha, beta in {0, 1/2}``.
+    ``symmetry_sector``
+        The free-text label recorded on the prepared spectrum. Defaults to
+        ``"parity-<sector>"`` when ``parity_sector`` is given and to ``None``
+        otherwise, which warns; see this module's docstring.
+    ``unfold_method``, ``unfold_degree``
+        Passed to :func:`~chaos_numerics.spectral.unfold`.
+    ``times`` (required for ``spectral_form_factor``), ``window``,
+    ``connected``, ``bootstrap``
+        Passed to :func:`~chaos_numerics.spectral.spectral_form_factor`.
+    ``lengths`` (required for ``number_variance``), ``samples``, ``bootstrap``,
+    ``finite_size_correction``
+        Passed to :func:`~chaos_numerics.spectral.number_variance`.
+    """
+    if analysis not in _QUANTUM_ANALYSES:
+        raise _unsupported_analysis(model_name, analysis, family="quantum")
+    model = _quantum_model(model_name, values)
+    dense_limit = _as_int(values.pop("dense_limit", DEFAULT_DENSE_LIMIT), name="dense_limit")
+    sector = _as_parity_sector(values.pop("parity_sector", None))
+    label = _symmetry_label(values.pop("symmetry_sector", None), sector)
+
+    if analysis in {"eigenphases", "eigenstates"}:
+        _reject_unused(values)
+        eigensystem = _resolved_eigensystem(
+            model, model_name, dense_limit=dense_limit, sector=sector
+        )
+        if analysis == "eigenstates":
+            return eigensystem
+        # Identical to quantum.eigenphases(model), which is itself a thin wrapper
+        # over eigenstates; spelling it out here is what lets parity_sector apply
+        # to the phases as well as to the full eigensystem.
+        return AnalysisResult(
+            "eigenphases",
+            eigensystem.eigenphases,
+            residuals=eigensystem.residuals,
+            metadata=eigensystem.metadata,
+        )
+
+    method = _as_unfold_method(values.pop("unfold_method", "mean"))
+    degree = _as_int(values.pop("unfold_degree", 5), name="unfold_degree")
+    bootstrap = _as_int(values.pop("bootstrap", 0), name="bootstrap")
+    if model_name == "cylinder_kicked_rotor":
+        # CylinderKickedRotor says this in its own docstring; the registry is where
+        # somebody actually writes the pairing down, so it says it here too.
+        warnings.warn(
+            "cylinder_kicked_rotor is a truncation of an infinite momentum lattice, "
+            "not a torus quantization, so its eigenphase statistics belong to the "
+            "truncation as much as to the rotor and must not be read as a test of "
+            "random-matrix universality. Use kicked_rotor for level statistics",
+            NumericalWarning,
+            stacklevel=4,
+        )
+
+    def unfolded() -> UnfoldedSpectrum:
+        """Run the diagonalize/desymmetrize/prepare/unfold chain on demand.
+
+        Deferred so that every curve parameter is validated first. A misspelled
+        ``window`` has to be a fast refusal, not one that arrives after an
+        ``O(N**3)`` diagonalization and after ``prepare_eigenphases`` has already
+        warned about a missing symmetry sector.
+        """
+        eigensystem = _resolved_eigensystem(
+            model, model_name, dense_limit=dense_limit, sector=sector
+        )
+        return unfold(
+            prepare_eigenphases(eigensystem, symmetry_sector=label),
+            method=method,
+            degree=degree,
+        )
+
+    if analysis == "spectral_form_factor":
+        times = _as_array_like(values.pop("times", None), name="times")
+        window = _as_window(values.pop("window", "none"))
+        connected = _as_bool(values.pop("connected", True), name="connected")
+        _reject_unused(values)
+        return spectral_form_factor(
+            unfolded(),
+            times,
+            window=window,
+            connected=connected,
+            bootstrap=bootstrap,
+            seed=seed,
+        )
+    lengths = _as_array_like(values.pop("lengths", None), name="lengths")
+    samples = _as_int(values.pop("samples", 2048), name="samples")
+    correction = _as_bool(
+        values.pop("finite_size_correction", False), name="finite_size_correction"
+    )
+    _reject_unused(values)
+    return number_variance(
+        unfolded(),
+        lengths,
+        samples=samples,
+        bootstrap=bootstrap,
+        seed=seed,
+        finite_size_correction=correction,
+    )
+
+
+def _resolved_eigensystem(
+    model: QuantumMap,
+    model_name: str,
+    *,
+    dense_limit: int,
+    sector: SymmetrySector | None,
+) -> EigenstateResult:
+    eigensystem = eigenstates(model, dense_limit=dense_limit)
+    if sector is None:
+        return eigensystem
+    return desymmetrize(eigensystem, _parity_operator(model, model_name), sector=sector)
+
+
+def _quantum_model(model_name: str, values: dict[str, object]) -> QuantumMap:
+    dimension = _as_int(values.pop("dimension", None), name="dimension")
+    if model_name == "kicked_rotor":
+        return KickedRotor(
+            dimension,
+            _as_float(values.pop("kick_strength", 1.0), name="kick_strength"),
+            _as_boundary_phases(values.pop("boundary_phases", 0.0)),
+        )
+    if model_name == "cylinder_kicked_rotor":
+        return CylinderKickedRotor(
+            dimension,
+            _as_float(values.pop("kick_strength", 1.0), name="kick_strength"),
+            _as_float(values.pop("effective_hbar", 1.0), name="effective_hbar"),
+        )
+    if model_name == "quantum_cat_map":
+        return QuantumCatMap(
+            dimension,
+            _as_matrix(values.pop("matrix", ((2, 1), (1, 1)))),
+            _as_boundary_phases(values.pop("boundary_phases", 0.0)),
+        )
+    return QuantumBakerMap(dimension, _as_boundary_phases(values.pop("boundary_phases", 0.5)))
+
+
+def _parity_operator(model: QuantumMap, model_name: str) -> ComplexArray:
+    operators = getattr(model, "symmetry_operators", {})
+    operator = operators.get("parity") if isinstance(operators, Mapping) else None
+    if operator is None:
+        raise ValidationError(
+            f"parity_sector was requested but model {model_name!r} exposes no parity symmetry "
+            "at these parameters, so there is no block to keep. The kicked rotor only has an "
+            "exact reflection for boundary_phases with 2*alpha and 2*beta integer; drop "
+            "parity_sector for generic Bloch phases, which break parity on purpose"
+        )
+    return cast(ComplexArray, operator)
+
+
+def _unsupported_analysis(model_name: str, analysis: str, *, family: str) -> ValidationError:
+    """Say that a model and an analysis do not go together, not just that one is unknown.
+
+    ``kicked_rotor`` with ``lyapunov_spectrum`` used to fail deep inside the
+    classical Lyapunov routine on a missing ``jacobian``, which reads as a bug in
+    the model rather than as a mismatched pair.
+    """
+    supported = _QUANTUM_ANALYSES if family == "quantum" else _CLASSICAL_ANALYSES
+    other = _CLASSICAL_ANALYSES if family == "quantum" else _QUANTUM_ANALYSES
+    if analysis in other:
+        other_family = "classical" if family == "quantum" else "quantum"
+        return ValidationError(
+            f"analysis {analysis!r} cannot be combined with model {model_name!r}: "
+            f"{analysis!r} applies to {other_family} models and {model_name!r} is a "
+            f"{family} model. {model_name!r} supports {_names(supported)}"
+        )
+    return ValidationError(
+        f"unknown experiment analysis {analysis!r}; expected one of {_names(_EXPERIMENT_ANALYSES)}"
+    )
 
 
 def _save_run(run: ExperimentRun, path: Path) -> None:
@@ -330,7 +621,7 @@ def _save_run(run: ExperimentRun, path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     result_payload = run.result.metadata_payload() if run.result is not None else None
     payload: dict[str, object] = {
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "job_id": run.job_id,
         "status": run.status,
         "experiment": run.experiment.to_dict(),
@@ -383,6 +674,18 @@ def _restore_result(
             cast(FloatArray, arrays["values"]),
             cast(FloatArray | None, arrays.get("uncertainty")),
             cast(FloatArray | None, arrays.get("residuals")),
+            metadata,
+        )
+    if result_type == "spectral_curve":
+        # ``uncertainty`` and ``variance`` are absent from the archive rather than
+        # stored as empty arrays when the producer reported none, so ``get``
+        # rebuilds them as ``None`` and the round trip preserves the distinction
+        # between "no error bar" and "an error bar that happens to be zero".
+        return SpectralCurve(
+            cast(FloatArray, arrays["x"]),
+            cast(FloatArray, arrays["values"]),
+            cast(FloatArray | None, arrays.get("uncertainty")),
+            cast(FloatArray | None, arrays.get("variance")),
             metadata,
         )
     raise ValidationError(f"unknown persisted result type {result_type!r}")
@@ -450,10 +753,15 @@ def _prepare_manifest(
         manifest = _read_json(path)
         _validate_schema(manifest, name="sweep manifest")
         if manifest.get("fingerprint") != fingerprint:
-            raise ValidationError("existing sweep manifest does not match this experiment and grid")
+            raise ValidationError(
+                f"existing sweep manifest at {path} describes a different experiment or "
+                f"parameter grid, so resuming would mix two studies in one directory. "
+                f"Point output= at a directory of its own, pass resume=False to refuse "
+                f"the existing results explicitly, or remove {path.parent} to start over"
+            )
         return manifest
     return {
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "fingerprint": fingerprint,
         "experiment": experiment.to_dict(),
         "seed_derivation": _SEED_DERIVATION,
@@ -504,13 +812,70 @@ def _canonical(value: object) -> str:
 
 
 def _environment() -> dict[str, object]:
-    return {
+    """Return the JSON-compatible reproducibility record for one run.
+
+    ``docs/design/numerical-standards.md`` section 10.1 requires the Python,
+    NumPy, and SciPy versions plus the platform. SciPy governs ARPACK and the
+    sparse eigensolvers, so its version changes results and is recorded. The
+    BLAS/LAPACK identity and any threading environment variables are recorded
+    too, because they change floating-point summation order.
+    """
+    environment: dict[str, object] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),
         "platform": platform.platform(),
         "chaos_numerics": __version__,
         "numpy": np.__version__,
+        "scipy": scipy.__version__,
     }
+    blas = _blas_description()
+    if blas is not None:
+        environment["blas"] = blas
+    threads = {
+        name: value
+        for name in (
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        )
+        if (value := os.environ.get(name)) is not None
+    }
+    if threads:
+        environment["thread_limits"] = threads
+    dirty = _git_is_dirty()
+    if dirty is not None:
+        environment["git_dirty"] = dirty
+    return environment
+
+
+def _names(values: tuple[str, ...]) -> str:
+    return ", ".join(repr(value) for value in values)
+
+
+def _blas_description() -> str | None:
+    """Return a short BLAS/LAPACK identifier from ``numpy.__config__``."""
+    show = getattr(np.__config__, "show", None)
+    if not callable(show):
+        return None
+    try:
+        config = show(mode="dicts")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not isinstance(config, Mapping):
+        return None
+    dependencies = config.get("Build Dependencies")
+    if not isinstance(dependencies, Mapping):
+        return None
+    parts: list[str] = []
+    for name in ("blas", "lapack"):
+        entry = dependencies.get(name)
+        if isinstance(entry, Mapping):
+            label = str(entry.get("name", name))
+            version = str(entry.get("version", "unknown"))
+            parts.append(f"{name}={label} {version}")
+    return "; ".join(parts) or None
 
 
 def _git_commit() -> str | None:
@@ -526,6 +891,26 @@ def _git_commit() -> str | None:
         return None
     commit = completed.stdout.strip()
     return commit or None
+
+
+def _git_is_dirty() -> bool | None:
+    """Return whether the working tree has uncommitted changes.
+
+    Recorded separately from ``git_commit`` so that the commit field stays a
+    parsable hash while a dirty tree is never silently persisted as a clean
+    commit. ``None`` means the state could not be determined.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    return bool(completed.stdout.strip())
 
 
 def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -729,10 +1114,10 @@ def _mapping(value: object, *, name: str) -> dict[str, object]:
 
 
 def _validate_schema(payload: Mapping[str, object], *, name: str) -> None:
-    if payload.get("schema_version") != _SCHEMA_VERSION:
+    if payload.get("schema_version") != SCHEMA_VERSION:
         raise ValidationError(
             f"unsupported {name} schema version {payload.get('schema_version')!r}; "
-            f"expected {_SCHEMA_VERSION}"
+            f"expected {SCHEMA_VERSION}"
         )
 
 
@@ -776,6 +1161,88 @@ def _as_int_sequence(value: object, *, name: str) -> tuple[int, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValidationError(f"{name} must be an integer sequence")
     return tuple(_as_int(item, name=name) for item in value)
+
+
+def _as_boundary_phases(value: object) -> BoundaryPhases:
+    """Build :class:`BoundaryPhases` from one of three JSON-compatible encodings.
+
+    ``Experiment.parameters`` has to survive ``json.dump`` and come back equal, so
+    a ``BoundaryPhases`` instance cannot be stored there. Three spellings are
+    accepted, and all three round-trip through JSON unchanged:
+
+    ``0.25``
+        A real number is the scalar shorthand ``alpha = beta = 0.25``, matching
+        the model constructors, which accept ``float | BoundaryPhases``.
+    ``[0.25, 0.13]``
+        A two-element sequence is ``[position, momentum]``. This is the spelling
+        to use in ``cartesian_grid``/``zip_grid``, because a list of pairs is the
+        natural way to write down a Bloch-phase ensemble.
+    ``{"position": 0.25, "momentum": 0.13}``
+        A mapping is exactly what ``BoundaryPhases.to_dict()`` returns, and
+        therefore exactly what a persisted result carries in
+        ``metadata.parameters["boundary_phases"]``. A value read back off disk can
+        be fed straight into the next sweep without reshaping.
+
+    Both phases are reduced modulo one by ``BoundaryPhases`` itself, so ``1.25``
+    and ``0.25`` name the same twist and would collide as two sweep rows.
+    """
+    if isinstance(value, Mapping):
+        row = _mapping(value, name="boundary_phases")
+        unknown = set(row) - {"position", "momentum"}
+        if unknown:
+            raise ValidationError(
+                "boundary_phases mapping accepts only 'position' and 'momentum'; got "
+                f"{', '.join(repr(name) for name in sorted(unknown))}"
+            )
+        return BoundaryPhases(
+            position=_as_float(row.get("position", 0.0), name="boundary_phases position"),
+            momentum=_as_float(row.get("momentum", 0.0), name="boundary_phases momentum"),
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if len(value) != 2:
+            raise ValidationError(
+                f"boundary_phases sequence must be [position, momentum]; got {len(value)} entries"
+            )
+        return BoundaryPhases(
+            position=_as_float(value[0], name="boundary_phases position"),
+            momentum=_as_float(value[1], name="boundary_phases momentum"),
+        )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValidationError(
+            "boundary_phases must be a real number, a [position, momentum] pair, or a "
+            "{'position': ..., 'momentum': ...} mapping; got "
+            f"{type(value).__name__}"
+        )
+    scalar = _as_float(value, name="boundary_phases")
+    return BoundaryPhases(position=scalar, momentum=scalar)
+
+
+def _as_parity_sector(value: object) -> SymmetrySector | None:
+    if value is None:
+        return None
+    if value not in {"even", "odd"}:
+        raise ValidationError(f"parity_sector must be 'even', 'odd', or null; got {value!r}")
+    return value
+
+
+def _symmetry_label(value: object, sector: SymmetrySector | None) -> str | None:
+    if value is None:
+        return None if sector is None else f"parity-{sector}"
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValidationError("symmetry_sector must be a non-empty trimmed string or null")
+    return value
+
+
+def _as_unfold_method(value: object) -> _UnfoldMethod:
+    if value not in {"mean", "polynomial"}:
+        raise ValidationError(f"unfold_method must be 'mean' or 'polynomial'; got {value!r}")
+    return value
+
+
+def _as_window(value: object) -> Window:
+    if value not in {"none", "hann"}:
+        raise ValidationError(f"window must be 'none' or 'hann'; got {value!r}")
+    return value
 
 
 def _as_matrix(value: object) -> tuple[tuple[int, int], tuple[int, int]]:

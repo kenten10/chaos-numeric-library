@@ -5,12 +5,21 @@ class ChaosNumericsError(Exception):
     """Base class for library-specific exceptions."""
 
 
-class ValidationError(ChaosNumericsError):
-    """Raised when an input violates a public shape, dtype, or value contract."""
+class ValidationError(ChaosNumericsError, ValueError):
+    """Raised when an input violates a public shape, dtype, or value contract.
+
+    Also a :class:`ValueError` so that ``except ValueError`` in downstream code
+    keeps catching rejected inputs, which is what callers expect from a numeric
+    library.
+    """
 
 
-class NumericalError(ChaosNumericsError):
-    """Raised when numerical failure prevents a meaningful result."""
+class NumericalError(ChaosNumericsError, ArithmeticError):
+    """Raised when numerical failure prevents a meaningful result.
+
+    Also an :class:`ArithmeticError` so that generic numerical error handling
+    outside this library still applies.
+    """
 
 
 class ConvergenceError(NumericalError):

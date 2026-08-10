@@ -8,20 +8,25 @@ the arrays themselves.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
 
 import numpy as np
 
+from chaos_numerics.core._payload import (
+    SCHEMA_VERSION,
+    AnyArray,
+    ArrayPayload,
+)
+from chaos_numerics.core._payload import (
+    add_convergence_history as _add_convergence_history,
+)
+from chaos_numerics.core._payload import (
+    metadata_payload as _metadata_payload,
+)
 from chaos_numerics.core._validation import as_complex_array, as_float_array
 from chaos_numerics.core.exceptions import ValidationError
 from chaos_numerics.core.metadata import ExperimentMetadata
 from chaos_numerics.core.types import ComplexArray, FloatArray
-
-SCHEMA_VERSION = 1
-AnyArray: TypeAlias = np.ndarray[tuple[int, ...], np.dtype[np.generic]]
-ArrayPayload: TypeAlias = dict[str, AnyArray]
 
 
 def _float_metadata() -> ExperimentMetadata:
@@ -81,6 +86,10 @@ class Trajectory:
     def is_batched(self) -> bool:
         """Whether one or more batch axes precede time and state."""
         return self.states.ndim > 2
+
+    def __reduce__(self) -> tuple[type[Trajectory], tuple[object, ...]]:
+        """Rebuild through ``__init__`` so unpickled arrays stay read-only."""
+        return (self.__class__, (self.states, self.initial_state, self.metadata))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Trajectory):
@@ -145,6 +154,13 @@ class Spectrum:
     def count(self) -> int:
         """Number of stored eigenvalues."""
         return self.eigenvalues.size
+
+    def __reduce__(self) -> tuple[type[Spectrum], tuple[object, ...]]:
+        """Rebuild through ``__init__`` so unpickled arrays stay read-only."""
+        return (
+            self.__class__,
+            (self.eigenvalues, self.eigenvectors, self.residuals, self.metadata),
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Spectrum):
@@ -214,6 +230,13 @@ class EigenstateResult:
     def count(self) -> int:
         """Number of stored eigenstates."""
         return self.eigenphases.size
+
+    def __reduce__(self) -> tuple[type[EigenstateResult], tuple[object, ...]]:
+        """Rebuild through ``__init__`` so unpickled arrays stay read-only."""
+        return (
+            self.__class__,
+            (self.eigenphases, self.eigenstates, self.residuals, self.metadata),
+        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, EigenstateResult):
@@ -285,6 +308,13 @@ class AnalysisResult:
         object.__setattr__(self, "uncertainty", uncertainty)
         object.__setattr__(self, "residuals", residuals)
 
+    def __reduce__(self) -> tuple[type[AnalysisResult], tuple[object, ...]]:
+        """Rebuild through ``__init__`` so unpickled arrays stay read-only."""
+        return (
+            self.__class__,
+            (self.name, self.values, self.uncertainty, self.residuals, self.metadata),
+        )
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, AnalysisResult):
             return NotImplemented
@@ -322,9 +352,7 @@ class AnalysisResult:
         if self.residuals is not None:
             arrays["residuals"] = self.residuals
         _add_convergence_history(arrays, self.metadata, copy=False)
-        payload = _metadata_payload("analysis", self.metadata, arrays)
-        payload["name"] = self.name
-        return payload
+        return _metadata_payload("analysis", self.metadata, arrays, name=self.name)
 
 
 def _readonly_float(value: FloatArray, *, name: str, ndim: int | None = None) -> FloatArray:
@@ -378,34 +406,6 @@ def _validate_metadata(metadata: ExperimentMetadata) -> None:
         raise ValidationError("metadata must be an ExperimentMetadata instance")
 
 
-def _add_convergence_history(
-    payload: ArrayPayload,
-    metadata: ExperimentMetadata,
-    *,
-    copy: bool = True,
-) -> None:
-    if metadata.convergence is not None and metadata.convergence.history is not None:
-        history = metadata.convergence.history
-        payload["convergence_history"] = history.copy() if copy else history
-
-
-def _metadata_payload(
-    result_type: Literal["trajectory", "spectrum", "eigenstate", "analysis"],
-    metadata: ExperimentMetadata,
-    arrays: Mapping[str, AnyArray],
-) -> dict[str, object]:
-    descriptors = {
-        name: {"shape": list(array.shape), "dtype": array.dtype.name}
-        for name, array in arrays.items()
-    }
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "result_type": result_type,
-        "metadata": metadata.to_dict(),
-        "arrays": descriptors,
-    }
-
-
 def _compact_repr(
     class_name: str,
     *,
@@ -420,4 +420,16 @@ def _compact_repr(
     )
 
 
-__all__ = ["AnalysisResult", "EigenstateResult", "Spectrum", "Trajectory"]
+# ``SCHEMA_VERSION``, ``AnyArray``, and ``ArrayPayload`` are defined in
+# ``core._payload`` and re-exported here because this module is where the four
+# result containers live and where the rest of the library already imports them
+# from. Listing them keeps that path explicit under ``implicit_reexport = false``.
+__all__ = [
+    "SCHEMA_VERSION",
+    "AnalysisResult",
+    "AnyArray",
+    "ArrayPayload",
+    "EigenstateResult",
+    "Spectrum",
+    "Trajectory",
+]

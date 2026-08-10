@@ -53,6 +53,19 @@ class Experiment:
             _validated_mapping(self.parameters, name="experiment parameters"),
         )
 
+    def __reduce__(self) -> tuple[type[Experiment], tuple[object, ...]]:
+        """Rebuild through ``__init__`` because ``mappingproxy`` cannot pickle."""
+        return (
+            self.__class__,
+            (
+                self.model,
+                self.analysis,
+                {key: _thaw(value) for key, value in self.parameters.items()},
+                self.seed,
+                self.strict_reproducibility,
+            ),
+        )
+
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible representation."""
         return {
