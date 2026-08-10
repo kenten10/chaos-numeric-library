@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27,<2"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -58,7 +58,7 @@ plot = [
 ]
 release = [
     "build==1.4.0",
-    "twine==6.2.0",
+    "twine==7.0.0",
 ]
 
 [tool.hatch.version]
