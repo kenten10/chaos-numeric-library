@@ -102,6 +102,7 @@ def leading_eigenpairs(
     # The public signature stays precise while the solver body keeps duck-typing
     # over SciPy's untyped sparse classes and dense arrays alike.
     raw_operator: Any = _solver_operator(operator)
+    _require_finite_operator(raw_operator)
     solved_operator: Any = raw_operator.T.conjugate() if side == "left" else raw_operator
     method = "dense" if pair_count >= dimension - 1 else "arpack"
     partial = False
@@ -372,6 +373,28 @@ def _operator_dimension(operator: OperatorLike) -> int:
     if dimension < 1:
         raise ValidationError("operator dimension must be positive")
     return dimension
+
+
+def _require_finite_operator(operator: Any) -> None:
+    """Reject a non-finite operator before a solver turns it into a foreign error.
+
+    The finiteness check used to live only in :func:`_dense_array`, which the
+    ARPACK branch never calls, so the same NaN-bearing operator produced three
+    different outcomes depending only on ``count`` and the SciPy version: a
+    :class:`~chaos_numerics.core.ValidationError` naming the problem on the dense
+    branch, ``ArpackError -9999`` complaining about workspace on SciPy 1.18, and a
+    :class:`~chaos_numerics.core.ConvergenceError` on SciPy 1.11 that blamed
+    convergence for invalid input.
+
+    Every accepted operator stores its values explicitly -- a dense array, a SciPy
+    sparse matrix, or an unwrapped :class:`~chaos_numerics.operators.UlamMatrix` --
+    because a purely matrix-free operator is deliberately not part of this
+    surface. So the check only has to look at the stored entries, and a sparse
+    operator is checked through ``.data`` without ever being densified.
+    """
+    values = operator.data if issparse(operator) else np.asarray(operator)
+    if not bool(np.all(np.isfinite(np.asarray(values)))):
+        raise ValidationError("operator must contain only finite values")
 
 
 def _dense_array(operator: Any) -> np.ndarray[tuple[int, ...], np.dtype[np.complex128]]:

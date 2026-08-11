@@ -33,6 +33,17 @@ from chaos_numerics.quantum.unitary import (
     _dense_unitarity_defect,
 )
 
+_UNITARITY_TOLERANCE = 1e-12
+"""Largest unitarity defect :func:`otoc` will accept, matching ``eigenstates``.
+
+``otoc`` builds ``A(t) = U^(-t) A U^t`` by taking the adjoint of ``U`` as its
+inverse, which is only correct for a unitary ``U``. Without this guard a
+non-unitary model produced a smooth, plausible, decaying correlator with no
+exception and no warning -- measured on a model whose dense form is ``0.9 * I``
+(defect 0.19): ``C(t) = [2.0, 1.312, 0.861, 0.565]``, while ``eigenstates`` and
+``evolve`` both refuse the same model. The defect was recorded in the metadata,
+which only helps a caller who thinks to read it."""
+
 
 def weyl_translations(
     dimension: int,
@@ -324,6 +335,13 @@ def otoc(
     tied to ``N`` by the torus quantization, and raising ``N`` costs
     ``O(N**3)``. **Use the ratio between regimes, not the absolute rate.**
 
+    **The model must be unitary**, to the same ``1e-12`` defect tolerance
+    :func:`~chaos_numerics.quantum.eigenstates` uses, and a model that is not
+    raises :class:`~chaos_numerics.core.NumericalError`. The recursion inverts the
+    propagator by taking its adjoint, which is the inverse only for a unitary
+    operator; without the guard a non-unitary model returned a smooth decaying
+    correlator with no warning at all.
+
     **Cost.** The dense path is the only one, because ``A(t)`` is a matrix and
     there is nothing for a matrix-free algorithm to act on. Each step is four
     ``O(N**3)`` products and ``dense_limit`` guards materializing the model
@@ -334,6 +352,13 @@ def otoc(
     count = _nonnegative_int(steps, name="steps")
     dimension = int(model.dimension)
     unitary = _dense_representation(model, dense_limit=dense_limit)
+    defect = _dense_unitarity_defect(unitary)
+    if defect > _UNITARITY_TOLERANCE:
+        raise NumericalError(
+            f"unitary defect {defect} exceeds otoc tolerance {_UNITARITY_TOLERANCE}; "
+            "the Heisenberg recursion inverts the propagator by taking its adjoint, "
+            "which is only the inverse for a unitary operator"
+        )
     adjoint = unitary.conj().T
     defaults = weyl_translations(dimension, boundary_phases=_model_boundary_phases(model))
     heisenberg = (

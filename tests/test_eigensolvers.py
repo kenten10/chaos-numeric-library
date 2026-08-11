@@ -401,3 +401,37 @@ def test_spectral_gap_requires_two_values() -> None:
     spectrum = leading_eigenpairs(np.asarray([[1.0]]), count=1)
     with pytest.raises(ValidationError, match="at least two"):
         spectral_gap(spectrum)
+
+
+def test_non_finite_operators_are_rejected_on_every_solver_branch() -> None:
+    """The same bad operator must give the same error whichever solver runs.
+
+    The finiteness check used to sit only in the dense fallback, so ``count``
+    picked the failure mode: ``count >= dimension - 1`` took the dense branch and
+    raised a `ValidationError` naming the problem, while a smaller ``count`` went
+    to ARPACK and surfaced `ArpackError -9999` about workspace on SciPy 1.18, or a
+    `ConvergenceError` on SciPy 1.11 that blamed convergence for invalid input.
+    One input, three outcomes, none of them dependent on anything the caller meant.
+
+    A sparse operator is now screened through ``.data``, so nothing is densified to
+    perform the check.
+    """
+    dimension = 10
+    for label, operator in (
+        ("sparse nan", csr_matrix(np.diag([np.nan] + [0.1] * (dimension - 1)))),
+        ("sparse inf", csr_matrix(np.diag([np.inf] + [0.1] * (dimension - 1)))),
+        ("dense nan", np.diag([np.nan] + [0.1] * (dimension - 1))),
+    ):
+        for count in (2, dimension - 1, dimension):
+            with pytest.raises(ValidationError, match="only finite values"):
+                leading_eigenpairs(operator, count=count)
+        with pytest.raises(ValidationError, match="only finite values"):
+            stationary_density(operator)
+        with pytest.raises(ValidationError, match="only finite values"):
+            spectral_gap(operator)
+        assert label  # keep the label meaningful in a failure report
+
+    # The screen must not reject a legitimate sparse operator whose *implicit*
+    # zeros outnumber its stored entries.
+    sparse = csr_matrix(np.eye(dimension) * 0.5)
+    assert leading_eigenpairs(sparse, count=2).count == 2

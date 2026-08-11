@@ -800,6 +800,47 @@ def test_loschmidt_echo_accepts_a_pair_of_different_model_classes() -> None:
     np.testing.assert_allclose(result.values, [1.0, 0.5, 1.0, 0.5, 1.0], atol=1e-15)
 
 
+def test_otoc_refuses_a_non_unitary_model_like_its_siblings() -> None:
+    """``otoc`` inverts the propagator by taking its adjoint, so ``U`` must be unitary.
+
+    Without a guard this was the library's characteristic bug: a model whose dense
+    form is ``0.9 * I`` -- unitarity defect 0.19, eleven orders of magnitude past
+    the tolerance used elsewhere -- returned the smooth decaying correlator
+    ``[2.0, 1.312, 0.861, 0.565]`` with no exception and **no warning**, while
+    ``eigenstates`` and ``evolve`` both refused the same object. The defect was
+    recorded in the metadata, which only helps a caller who thinks to read it.
+    """
+
+    class Shrinking:
+        """Dense form ``0.9 * I``: badly non-unitary but otherwise well behaved."""
+
+        dimension = 4
+
+        def apply(
+            self, state: ArrayLike, /
+        ) -> np.ndarray[tuple[int, ...], np.dtype[np.complex128]]:
+            return np.asarray(state, dtype=np.complex128) * 0.9
+
+        def as_linear_operator(self) -> LinearOperator:
+            return LinearOperator((4, 4), matvec=lambda v: 0.9 * v, dtype=np.dtype(np.complex128))
+
+        def to_dense(self) -> np.ndarray[tuple[int, ...], np.dtype[np.complex128]]:
+            return 0.9 * np.eye(4, dtype=np.complex128)
+
+    model = Shrinking()
+    with pytest.raises(NumericalError, match="exceeds otoc tolerance"):
+        otoc(model, steps=3)
+    # The three entry points that materialize a propagator now agree on the same
+    # input, which is the property that was missing rather than the message.
+    with pytest.raises(NumericalError):
+        eigenstates(model)
+    with pytest.raises(NumericalError):
+        evolve(model, basis_state(dimension=4, index=0), steps=3)
+    # A genuinely unitary model at the same dimension still works, so the guard is
+    # not simply refusing everything.
+    assert float(np.asarray(otoc(KickedRotor(4, 3.0), steps=2).values)[0]) > 0.0
+
+
 def test_otoc_is_bounded_and_saturates_near_two() -> None:
     """Bounded by 4 from ``||[A, B]|| <= 2 ||A|| ||B||``; settles at 2 in practice."""
     values = otoc(KickedRotor(128, 10.0), steps=200).values
