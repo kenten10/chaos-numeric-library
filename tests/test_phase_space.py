@@ -50,11 +50,26 @@ def test_periodized_coherent_state_is_normalized_and_periodic(dimension: int) ->
     np.testing.assert_allclose(translated, state, rtol=1e-13, atol=1e-14)
 
 
-def test_coherent_state_matches_independent_periodized_sum() -> None:
+@pytest.mark.parametrize(
+    "phases",
+    [
+        # ``beta`` must take a value where the sign of the boundary twist is
+        # observable. At ``beta = 0`` the twist is 1 and at ``beta = 0.5`` it is
+        # ``exp(+-i pi m) = (-1)**m``, identical for either sign, so a reference
+        # test written only at those two values cannot see a flipped sign. That
+        # gap was real: negating the exponent in ``_coherent_batch`` changed
+        # Husimi output and the whole suite stayed green.
+        BoundaryPhases(0.25, 0.5),
+        BoundaryPhases(0.25, 0.13),
+        BoundaryPhases(0.0, 0.37),
+        BoundaryPhases(0.5, 0.75),
+    ],
+    ids=["beta=1/2 (sign-blind)", "beta=0.13", "beta=0.37", "beta=3/4"],
+)
+def test_coherent_state_matches_independent_periodized_sum(phases: BoundaryPhases) -> None:
     dimension = 6
     position = 0.2
     momentum = 0.7
-    phases = BoundaryPhases(0.25, 0.5)
     q_basis = (np.arange(dimension) + phases.position) / dimension
     expected = np.zeros(dimension, dtype=np.complex128)
     for index, q_value in enumerate(q_basis):

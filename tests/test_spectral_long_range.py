@@ -1599,3 +1599,82 @@ def test_spectral_containers_describe_every_array_they_persist(
     assert set(payload) <= set(described), (name, set(payload) - set(described))
     for key, array in payload.items():
         assert described[key] == {"shape": list(array.shape), "dtype": array.dtype.name}
+
+
+def test_batch_means_variance_is_the_unbiased_estimate_over_arcs() -> None:
+    """The **default** error path also needs ``ddof=1`` pinned, not just bootstrap.
+
+    Two white-box tests in this file pin ``ddof=1`` for the two bootstrap paths, but
+    the estimator that ``number_variance`` and ``spectral_rigidity`` report out of
+    the box is the batch-means one, and the only thing constraining it was the
+    0.5-2.0 calibration band. That band cannot see a ``ddof`` flip: with ``b`` arcs
+    the variance changes by ``(b-1)/b``, which is 0.96-0.99 at the arc counts these
+    tests use. So the flip survived.
+
+    Forcing exactly two arcs makes the identity trivial and the difference maximal:
+    ``var([m1, m2], ddof=1) = (m1-m2)**2/2``, so the reported standard error is
+    ``|m1-m2|/2``, whereas ``ddof=0`` would give ``|m1-m2|/(2*sqrt(2))``.
+    """
+    dimension = 32
+    samples = 64
+    length = 12.0
+    rng = np.random.default_rng(5)
+    prepared = prepare_eigenphases(
+        np.sort(rng.uniform(0.0, 2.0 * np.pi, dimension)),
+        symmetry_sector="uniform",
+        degeneracy_tolerance=0.0,
+    )
+
+    result = number_variance(prepared, [length], samples=samples)
+
+    # Same reconstruction as the bootstrap white-box test above.
+    levels = (np.asarray(prepared.phases) - prepared.phases[0]) / (2.0 * np.pi / dimension)
+    canonical = np.sort(np.mod(levels, dimension))
+    doubled = np.concatenate((canonical, canonical + dimension))
+    origins = (np.arange(samples, dtype=np.float64) + 0.5) * dimension / samples
+    starts = np.searchsorted(canonical, origins, side="left")
+    ends = np.searchsorted(doubled, origins + length, side="left")
+    squared = (ends - starts - length) ** 2.0
+    arcs = min(samples, int(dimension // length))
+    assert arcs == 2, "the identity below only holds for two arcs"
+    first, second = (float(part.mean()) for part in np.array_split(squared, arcs))
+
+    assert result.uncertainty is not None
+    expected = abs(first - second) / 2.0
+    assert float(result.uncertainty[0]) == pytest.approx(expected, rel=1e-12)
+    # State what the rejected alternative would have produced, so the margin is visible.
+    assert float(result.uncertainty[0]) != pytest.approx(expected / np.sqrt(2.0), rel=1e-6)
+
+
+def test_hann_connected_background_removes_the_window_sidelobes() -> None:
+    """A perfectly rigid spectrum has no connected fluctuations, in any window.
+
+    The Hann background is ``0.5*N*sinc(N*tau) + 0.25*N*(sinc(N*tau+1) +
+    sinc(N*tau-1))``. Every existing Hann assertion sits where the two sidelobe
+    terms vanish exactly -- ``tau = 0`` and integer ``N*tau`` -- so dropping them
+    left the suite green. An equally spaced comb is the sharpest probe available:
+    its connected form factor must collapse to zero at generic ``tau``, and it only
+    does so if the whole background, sidelobes included, is subtracted.
+
+    Measured: with the sidelobes the residual is at most 7.4e-3; without them it
+    ranges 0.32 to 10.4, three to four orders of magnitude larger.
+    """
+    dimension = 64
+    rigid = unfold(
+        prepare_eigenphases(
+            np.arange(dimension) * 2.0 * np.pi / dimension,
+            symmetry_sector="rigid",
+            degeneracy_tolerance=0.0,
+        ),
+        method="mean",
+    )
+    # Deliberately away from integer ``N*tau``, where the sidelobes are largest.
+    taus = np.asarray([0.3, 0.7, 1.3, 2.4]) / dimension
+
+    connected = np.asarray(spectral_form_factor(rigid, taus, connected=True, window="hann").values)
+
+    assert float(np.max(np.abs(connected))) <= 0.05
+    # The flat window is already covered elsewhere; check it here too so that a
+    # regression in the shared background helper cannot hide in one branch.
+    flat = np.asarray(spectral_form_factor(rigid, taus, connected=True, window="none").values)
+    assert float(np.max(np.abs(flat))) <= 0.05

@@ -187,6 +187,93 @@ def test_dense_and_matrix_free_evolve_match_for_scalar_batch_and_history() -> No
     np.testing.assert_allclose(np.linalg.norm(stored.history, axis=-1), np.ones((2, 8)), atol=1e-14)
 
 
+def test_eigenstates_publish_the_gauge_their_metadata_claims() -> None:
+    """``eigenstate_normalization`` is a promise, so it has to be checked.
+
+    An eigenvector is only defined up to a phase, so the library fixes one and
+    publishes it as ``"unit L2 norm; largest component positive real"``. Nothing
+    checked that the published string was true, and every consumer in the library
+    -- ``desymmetrize``, the residuals, the participation ratios -- is
+    gauge-invariant, so nothing would have noticed if it were not.
+
+    Worth recording what deleting the phase fix in ``_normalize_columns`` actually
+    does here: **nothing**. LAPACK's ``zgeev``, which ``numpy.linalg.eig`` calls,
+    already normalizes each eigenvector to unit norm with its largest component
+    real, and measured over 2391 eigenvectors of Haar-random unitaries that
+    component was positive every time. So the phase fix on this path is insurance
+    against a LAPACK that behaves differently, not live code, and a mutation test
+    cannot distinguish the two. The sparse path is the opposite: raw ARPACK
+    ``eigs`` returned imaginary parts up to 0.66 and a negative real pivot in 65
+    of 120 columns, which is why the same fix in ``operators/eigensolvers.py`` is
+    load-bearing and is pinned there by a test that a mutation does break.
+
+    This test therefore pins the *contract* rather than the implementation, which
+    is the right thing to pin: the promise must hold whoever provides it.
+
+    ``argmax`` picks the *first* maximal component, which matters when two are
+    equally large, so the check finds the pivot the same way rather than assuming
+    the maximum is unique.
+    """
+    for model in (
+        KickedRotor(24, 7.0, BoundaryPhases(0.25, 0.13)),
+        QuantumCatMap(8),
+        QuantumBakerMap(12),
+    ):
+        system = eigenstates(model)
+        assert system.metadata.parameters["eigenstate_normalization"] == (
+            "unit L2 norm; largest component positive real"
+        )
+        columns = np.asarray(system.eigenstates)
+        for index in range(columns.shape[1]):
+            column = columns[:, index]
+            pivot = int(np.argmax(np.abs(column)))
+            assert abs(float(np.linalg.norm(column)) - 1.0) <= 1e-14
+            # Positive real means a vanishing imaginary part and a positive real
+            # part -- asserting only ``imag == 0`` would accept the sign flip.
+            assert abs(float(np.imag(column[pivot]))) <= 1e-14
+            assert float(np.real(column[pivot])) > 0.0
+
+
+def test_evolve_audits_the_norm_on_the_documented_schedule() -> None:
+    """The audit schedule is "first step, every 16th, and the final step".
+
+    ``norm_audits`` is published metadata and the first-step audit is what makes a
+    map that breaks immediately fail fast. Neither was tested: the only norm-drift
+    test used ``steps=1``, where the first step *is* the final step, so dropping
+    the first-step audit changed nothing that the suite could see.
+    """
+    model = KickedRotor(16, 5.0)
+    initial = basis_state(dimension=16, index=0)
+    # (steps, expected audits): 0 -> never checked; 1 -> first == final, one audit;
+    # 16 -> step 16 is both the 16th and the final; 17 -> first, 16th, final.
+    for steps, expected in ((0, 0), (1, 1), (2, 2), (16, 2), (17, 3), (33, 4)):
+        run = evolve(model, initial, steps=steps)
+        assert run.metadata.parameters["norm_audits"] == expected, steps
+
+    class BreaksOnTheFirstStepOnly:
+        """Loses norm once, at step 0, then behaves. Only a first-step audit sees it."""
+
+        dimension = 4
+
+        def __init__(self) -> None:
+            self._first = True
+
+        def apply(
+            self, state: ArrayLike, /
+        ) -> np.ndarray[tuple[int, ...], np.dtype[np.complex128]]:
+            values = np.asarray(state, dtype=np.complex128)
+            if self._first:
+                self._first = False
+                return values * 0.5
+            return values
+
+        def as_linear_operator(self) -> LinearOperator:
+            return LinearOperator((4, 4), matvec=lambda v: v, dtype=np.dtype(np.complex128))
+
+    with pytest.raises(NumericalError, match="norm drift"):
+        evolve(BreaksOnTheFirstStepOnly(), basis_state(dimension=4, index=0), steps=40)
+
+
 def test_unitarity_defect_matches_its_documented_normalization() -> None:
     """Pin ``||U.H U - I||_F / sqrt(N)`` on a deliberately non-unitary operator.
 
