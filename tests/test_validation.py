@@ -1,10 +1,14 @@
 """Tests for runtime validation independent from static protocols."""
 
+from collections.abc import Callable
+
 import numpy as np
 import pytest
 
 from chaos_numerics.core import (
     ClassicalMap,
+    ConvergenceInfo,
+    ExperimentMetadata,
     Flow,
     LinearOperatorLike,
     Partition,
@@ -21,6 +25,14 @@ from chaos_numerics.core._validation import (
     validate_positive_int,
     validate_shape,
 )
+
+
+def floats(value: object) -> np.ndarray[tuple[int, ...], np.dtype[np.float64]]:
+    return np.asarray(value, dtype=np.float64)
+
+
+def complexes(value: object) -> np.ndarray[tuple[int, ...], np.dtype[np.complex128]]:
+    return np.asarray(value, dtype=np.complex128)
 
 
 def test_float_array_promotes_numeric_input_and_preserves_batch_axes() -> None:
@@ -160,3 +172,62 @@ def test_protocol_members_are_derived_identically_without_cpythons_cache(
     assert derived == expected
     monkeypatch.setattr(protocol, "__protocol_attrs__", None)
     assert _protocol_members(protocol) == expected
+
+
+def test_public_constructors_raise_validation_error_rather_than_leaking() -> None:
+    """A wrong *type* must fail the same way a wrong *value* does.
+
+    ``ValidationError`` subclasses ``ValueError`` precisely so that a caller can
+    write ``except ValueError``. Six constructors used the idiom
+    ``if not value or value.strip() != value``, which short-circuits only for falsy
+    values, so any truthy non-string reached ``.strip()`` and left with an
+    ``AttributeError`` -- caught by neither ``except ValueError`` nor
+    ``except ChaosNumericsError``. Two more leaked an ``AssertionError`` and a bare
+    ``KeyError``. Each is checked here through ``except ValueError`` as well, because
+    that is the contract the exception hierarchy advertises.
+    """
+    from chaos_numerics.core import AnalysisResult, Diagnostic, EigenstateResult
+    from chaos_numerics.experiment import Experiment
+
+    cases: list[tuple[str, Callable[[], object]]] = [
+        ("AnalysisResult name", lambda: AnalysisResult(5, np.ones(2))),  # type: ignore[arg-type]
+        ("Experiment model", lambda: Experiment(5, "trajectory")),  # type: ignore[arg-type]
+        ("Experiment analysis", lambda: Experiment("standard_map", 5)),  # type: ignore[arg-type]
+        ("Diagnostic code", lambda: Diagnostic(5, "message")),  # type: ignore[arg-type]
+        ("ConvergenceInfo reason", lambda: ConvergenceInfo(True, 1, 0.0, 1e-9, None, 5)),  # type: ignore[arg-type]
+        ("metadata git_commit", lambda: ExperimentMetadata(git_commit=5)),  # type: ignore[arg-type]
+        (
+            "EigenstateResult residuals",
+            # The declared type says required; the runtime used to accept None anyway.
+            lambda: EigenstateResult(floats([0.1, 0.2]), complexes(np.eye(2)), None),  # type: ignore[arg-type]
+        ),
+        ("ConvergenceInfo iterations float", lambda: ConvergenceInfo(True, 2.5)),  # type: ignore[arg-type]
+        ("ConvergenceInfo iterations str", lambda: ConvergenceInfo(True, "3")),  # type: ignore[arg-type]
+        ("ConvergenceInfo residual str", lambda: ConvergenceInfo(True, 1, "abc")),  # type: ignore[arg-type]
+    ]
+    for label, call in cases:
+        with pytest.raises(ValidationError):
+            call()
+        # The advertised catch pattern has to work too.
+        with pytest.raises(ValueError):
+            call()
+        assert label
+
+    # A float that happens to be integral is still rejected: silently storing
+    # ``iterations=2.5`` as ``2`` was a wrong answer where an error belongs.
+    with pytest.raises(ValidationError, match="non-negative integer"):
+        ConvergenceInfo(True, 3.0)  # type: ignore[arg-type]
+    assert ConvergenceInfo(True, 3).iterations == 3
+
+
+def test_missing_required_analysis_parameter_names_itself() -> None:
+    """``values.pop("steps")`` used to raise a ``KeyError`` whose message was ``'steps'``.
+
+    Persisted by a sweep that becomes ``{"type": "KeyError", "message": "'steps'"}``
+    in the manifest, which says nothing about which analysis wanted it.
+    """
+    from chaos_numerics.experiment import Experiment, run_experiment
+
+    for analysis in ("trajectory", "lyapunov_spectrum", "largest_lyapunov_exponent"):
+        with pytest.raises(ValidationError, match=r"requires the parameter 'steps'"):
+            run_experiment(Experiment(model="standard_map", analysis=analysis, seed=1))

@@ -23,7 +23,11 @@ from chaos_numerics.core._payload import (
 from chaos_numerics.core._payload import (
     metadata_payload as _metadata_payload,
 )
-from chaos_numerics.core._validation import as_complex_array, as_float_array
+from chaos_numerics.core._validation import (
+    as_complex_array,
+    as_float_array,
+    validate_trimmed_string,
+)
 from chaos_numerics.core.exceptions import ValidationError
 from chaos_numerics.core.metadata import ExperimentMetadata
 from chaos_numerics.core.types import ComplexArray, FloatArray
@@ -219,8 +223,13 @@ class EigenstateResult:
                 "eigenstates must store states in columns with shape "
                 f"(dimension, {eigenphases.size}); got {eigenstates.shape}"
             )
+        if self.residuals is None:
+            raise ValidationError(
+                "eigenstate residuals are required; pass the per-state residual norms"
+            )
         residuals = _optional_residuals(self.residuals, count=eigenphases.size)
-        assert residuals is not None
+        if residuals is None:  # pragma: no cover - defended by the check above
+            raise ValidationError("eigenstate residuals are required")
         _validate_metadata(self.metadata)
         object.__setattr__(self, "eigenphases", eigenphases)
         object.__setattr__(self, "eigenstates", eigenstates)
@@ -288,8 +297,7 @@ class AnalysisResult:
     metadata: ExperimentMetadata = field(default_factory=_float_metadata)
 
     def __post_init__(self) -> None:
-        if not self.name or self.name.strip() != self.name:
-            raise ValidationError("analysis name must be a non-empty trimmed string")
+        validate_trimmed_string(self.name, name="analysis name")
         values = _readonly_float(self.values, name="analysis values")
         uncertainty = _optional_same_shape(
             self.uncertainty,
