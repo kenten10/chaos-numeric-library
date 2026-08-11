@@ -29,6 +29,7 @@ The distribution name and import package are `chaos-numerics` and
 ```text
 src/chaos_numerics/
 ├── __init__.py                 # curated stable re-exports only
+├── _version.py                 # single source of __version__
 ├── core/
 │   ├── __init__.py             # public common types and protocols
 │   ├── protocols.py            # structural model/operator protocols
@@ -36,6 +37,7 @@ src/chaos_numerics/
 │   ├── results.py              # immutable result containers
 │   ├── metadata.py             # provenance and convergence metadata
 │   ├── exceptions.py           # public exception/warning hierarchy
+│   ├── _payload.py             # shared private persistence-payload builders
 │   └── _validation.py          # shared private runtime validation
 ├── classical/
 │   ├── __init__.py             # classical public surface
@@ -43,13 +45,16 @@ src/chaos_numerics/
 │   ├── trajectories.py         # iterate
 │   ├── lyapunov.py             # Lyapunov algorithms
 │   ├── transport.py            # correlation and transport statistics
+│   ├── sections.py             # poincare_section, PoincareSection
 │   └── periodic.py             # low-period orbit search
 ├── quantum/
 │   ├── __init__.py             # quantum public surface
 │   ├── states.py               # state construction and validation
-│   ├── kicked_rotor.py
-│   ├── cat.py
-│   ├── baker.py
+│   ├── kicked_rotor.py         # KickedRotor, CylinderKickedRotor
+│   ├── maps.py                 # QuantumCatMap, QuantumBakerMap
+│   ├── unitary.py              # DenseUnitary, eigenstates, eigenphases
+│   ├── evolution.py            # evolve, QuantumEvolution
+│   ├── diagnostics.py          # loschmidt_echo, otoc, weyl_translations
 │   └── phase_space.py          # coherent states, Husimi data, localization
 ├── operators/
 │   ├── __init__.py             # transfer-operator public surface
@@ -58,11 +63,9 @@ src/chaos_numerics/
 │   └── eigensolvers.py
 ├── spectral/
 │   ├── __init__.py             # spectral-statistics public surface
-│   ├── phases.py
-│   ├── unfolding.py
-│   ├── spacing.py
-│   ├── long_range.py
-│   └── rmt.py
+│   ├── levels.py               # prepare_eigenphases, unfold, spacings, gap ratios
+│   ├── _ensembles.py           # shared private ensemble names and aliases
+│   └── long_range.py           # form factor, number variance, RMT references
 └── experiment/
     ├── __init__.py             # experiment public surface
     ├── config.py
@@ -74,7 +77,7 @@ src/chaos_numerics/
 `core` owns vocabulary shared by two or more domains:
 
 - structural protocols: `ClassicalMap`, `Flow`, `QuantumMap`,
-  `LinearOperatorLike`, and `Partition`;
+  `LinearOperatorLike`, `Partition`, and `SerializableResult`;
 - state/operator NumPy typing aliases;
 - immutable `Trajectory`, `Spectrum`, `EigenstateResult`, `AnalysisResult`, and
   metadata types;
@@ -126,12 +129,33 @@ Closed-system columns sum to one. Open systems must opt in explicitly. In v0.1,
 contract: an out-of-domain image is an error. With `open_system=True`, the matrix
 is substochastic and each column deficit is the source cell's escaped probability.
 The implementation must expose those deficits as diagnostics; it never infers an
-open system merely from a failed lookup.
+open system merely from a failed lookup. Deciding which sampled images escaped is
+vectorized for the built-in rectangular partitions and falls back to one `locate`
+call per point for a user-defined `Partition`, because the public protocol offers no
+batch acceptance test. The two paths agree bit for bit; only the cost differs, by
+about a factor of forty.
+
+`UlamMatrix` is an immutable container composed of a canonical CSR matrix, the
+per-column escape probabilities, and build metadata. It is deliberately not a
+SciPy sparse subclass: subclassing exported seventy-odd SciPy methods as v0.1
+contract and left the matrix mutable, so escape diagnostics could drift out of
+step with the values they describe. The container forwards only `shape`, `dtype`,
+`nnz`, `matvec`, `toarray()`, and `@`, which is enough to satisf
+`core.LinearOperatorLike`; every other SciPy operation goes through the `.matrix`
+attribute. Diagnostics do not survive such an operation, because the escape
+probabilities of a product are not a function of the operands' escape
+probabilities, so a caller who composes matrices carries the diagnostics
+themselves. The stored CSR arrays and escape probabilities are read-only, and
+`array_payload()` / `metadata_payload()` follow the same persistence convention as
+the `core` result types. The constructor enforces column sums no greater than one,
+which makes substochasticity an invariant of the type rather than something each
+consumer rechecks.
 
 ### 2.5 `spectral`
 
 `spectral` owns domain-neutral phase/level preparation, unfolding, spacing
-statistics, spectral form factor, number variance, and Poisson/GOE/GUE/CUE
+statistics, spacing-distribution and gap-ratio references, spectral form factor,
+number variance, Dyson-Mehta spectral rigidity, and Poisson/GOE/COE/GUE/CUE
 references. It accepts arrays or `core.Spectrum` and returns core result types.
 
 It must not import concrete quantum models, classical models, or plotting
@@ -144,10 +168,12 @@ by importing model-specific code.
 resume/progress behavior, seed derivation, and JSON/NPZ persistence. It is the only
 layer allowed to compose built-in capabilities across sibling domains.
 
-The generic runner operates on callables and core result types. The private
-`_registry` may import public names from `classical`, `quantum`, `operators`, and
-`spectral` to support string-based built-ins. No sibling package may import
-`experiment`.
+The generic runner operates on callables and core result types. String-based
+built-ins are resolved inside `execution.py`, which is the only module allowed to
+import public names from `classical`, `quantum`, `operators`, and `spectral`. No
+sibling package may import `experiment`. An earlier draft of this document placed
+that resolution in a separate `_registry` module; v0.1 keeps it in `execution.py`
+and the isolation rule applies to that module instead.
 
 ## 3. Dependency direction
 
@@ -181,7 +207,7 @@ More precisely:
 | `operators` | `core`, NumPy, SciPy sparse/sparse.linalg |
 | `quantum` | `core`, NumPy, selected SciPy FFT/linear algebra |
 | `spectral` | `core`, NumPy, selected SciPy statistics/interpolation |
-| `experiment` | `core`; public sibling APIs only in `_registry` adapters |
+| `experiment` | `core`; public sibling APIs only in `execution.py` adapters |
 | package `__init__` | public subpackage names solely for re-export |
 
 Rules that enforce acyclicity:
@@ -248,28 +274,48 @@ in section 9.
 ```python
 from chaos_numerics.core import (
     AnalysisResult,
+    AnyArray,
+    ArrayLike,
+    ArrayPayload,
+    BatchShape,
+    BoolArray,
     ChaosNumericsError,
     ChaosNumericsWarning,
+    ClassicalBatch,
     ClassicalMap,
+    ClassicalState,
+    ComplexArray,
     ConvergenceError,
+    ConvergenceInfo,
     ConvergenceWarning,
+    Diagnostic,
     EigenstateResult,
     ExperimentMetadata,
+    FloatArray,
     Flow,
+    IndexArray,
     LinearOperatorLike,
     NumericalError,
     NumericalWarning,
+    OperatorArray,
+    OperatorShape,
     Partition,
+    QuantumBatch,
     QuantumMap,
+    QuantumState,
     ReproducibilityWarning,
+    SerializableResult,
+    Shape,
     Spectrum,
+    StateShape,
     Trajectory,
     ValidationError,
 )
 ```
 
-`ClassicalMap`, `Flow`, `QuantumMap`, `LinearOperatorLike`, and `Partition` are
-runtime-checkable structural protocols where runtime checks are reliable.
+`ClassicalMap`, `Flow`, `QuantumMap`, `LinearOperatorLike`, `Partition`, and
+`SerializableResult` are runtime-checkable structural protocols where runtime checks
+are reliable.
 Conformance primarily means possessing the documented methods and array behavior;
 users do not subclass a library base class. The `Flow` protocol allows future
 implementations to integrate without changing `core`, but v0.1 ships no flow
@@ -277,11 +323,28 @@ solver or concrete flow model.
 
 ### 4.4 Domain public surfaces
 
+Type aliases that appear in a public signature are part of the public surface: a
+package that ships `py.typed` has to let callers annotate their own code with the
+same names. The listings here and in section 4.3 therefore include `Observable`,
+`Method`, `Ensemble`, `Statistic`, `Window`, `Side`, `OperatorLike`,
+`EvolutionMethod`, `SymmetrySector`, `CatMatrix`, the dtype and shape aliases from
+`core`, and the persistence pair `AnyArray` / `ArrayPayload` that every
+`array_payload()` returns. Aliases that exist only to constrain an implementation,
+such as `CanonicalEnsemble`, and the `experiment` result union `Result` /
+`RunStatus`, stay private.
+
+Each listing is the module's complete `__all__`, and `tests/test_documentation.py`
+asserts that, so a new export cannot land here without being named.
+
 ```python
 from chaos_numerics.classical import (
     BakerMap,
     CatMap,
+    LogisticMap,
+    Method,
+    Observable,
     PeriodicOrbitResult,
+    PoincareSection,
     StandardMap,
     autocorrelation,
     find_periodic_orbits,
@@ -290,10 +353,13 @@ from chaos_numerics.classical import (
     local_diffusion_exponent,
     lyapunov_spectrum,
     mean_square_displacement,
+    poincare_section,
 )
 
 from chaos_numerics.operators import (
+    OperatorLike,
     RectangularPartition,
+    Side,
     UlamMatrix,
     UniformPartition,
     build_ulam,
@@ -303,37 +369,62 @@ from chaos_numerics.operators import (
 )
 
 from chaos_numerics.quantum import (
+    DEFAULT_DENSE_LIMIT,
     BoundaryPhases,
+    CatMatrix,
+    CylinderKickedRotor,
     DenseUnitary,
+    EvolutionMethod,
+    HusimiResult,
     KickedRotor,
-    QuantumBasis,
     QuantumBakerMap,
+    QuantumBasis,
     QuantumCatMap,
+    QuantumEvolution,
+    SymmetrySector,
+    WignerResult,
     basis_state,
     coherent_state,
-    evolve,
+    desymmetrize,
     eigenphases,
     eigenstates,
+    evolve,
     husimi_distribution,
     inverse_participation_ratio,
+    loschmidt_echo,
     normalize_state,
+    otoc,
     participation_ratio,
+    quantum_state,
     shannon_entropy,
     unitarity_defect,
+    weyl_translations,
+    wigner_distribution,
 )
 
 from chaos_numerics.spectral import (
+    Ensemble,
+    PreparedEigenphases,
+    SpacingDistributionResult,
+    SpectralCurve,
+    Statistic,
+    UnfoldedSpectrum,
+    Window,
     adjacent_gap_ratios,
+    mean_gap_ratio_reference,
     number_variance,
     prepare_eigenphases,
     rmt_reference,
     spacing_distribution,
     spectral_form_factor,
+    spectral_rigidity,
     unfold,
 )
 
 from chaos_numerics.experiment import (
     Experiment,
+    ExperimentRun,
+    SweepResult,
     cartesian_grid,
     load_result,
     run_experiment,
@@ -357,7 +448,10 @@ from chaos_numerics.classical import StandardMap, iterate, lyapunov_spectrum
 model = StandardMap(kick_strength=5.0)
 initial = np.array([0.1, 0.2], dtype=np.float64)
 trajectory = iterate(model, initial, steps=10_000)
-lyapunov = lyapunov_spectrum(model, initial, steps=10_000)
+# A Lyapunov time average converges as 1/sqrt(steps), and the standard map is far
+# slower than a uniformly hyperbolic one. Ask for the accuracy this run length can
+# actually deliver rather than accepting the default and a ConvergenceWarning.
+lyapunov = lyapunov_spectrum(model, initial, steps=10_000, convergence_rtol=5e-2)
 ```
 
 ### 5.2 Ulam approximation without a concrete-model dependency
@@ -375,21 +469,29 @@ spectrum = leading_eigenpairs(ulam, count=8)
 ### 5.3 Matrix-free quantum evolution and explicit spectral analysis
 
 ```python
-from chaos_numerics.quantum import KickedRotor, basis_state, evolve
+from chaos_numerics.quantum import KickedRotor, basis_state, eigenstates, evolve
 from chaos_numerics.spectral import adjacent_gap_ratios, prepare_eigenphases
 
 model = KickedRotor(dimension=4096, kick_strength=8.0)
 state = basis_state(dimension=model.dimension, index=0)
-final_state = evolve(model, state, steps=100, method="fft")
+final_state = evolve(model, state, steps=100, method="fft").final_state
 
-# Use a small dense reference only when the full spectrum is actually required.
-spectrum = model.eigensystem(method="dense")
+# Spectra come from the module-level `eigenstates`, never from a model method, and
+# only at a dimension where an O(N**2) dense reference is affordable. `dense_limit`
+# defaults to `DEFAULT_DENSE_LIMIT` and is the explicit guard: raise it
+# deliberately rather than by accident.
+reference = KickedRotor(dimension=1024, kick_strength=8.0)
+spectrum = eigenstates(reference, dense_limit=1024)
 prepared = prepare_eigenphases(spectrum, symmetry_sector="even")
 ratios = adjacent_gap_ratios(prepared)
 ```
 
+`prepare_eigenphases` accepts a 1-D array of phases or an `EigenstateResult`. It
+does not accept `core.Spectrum`, whose eigenvalues are complex.
+
 ### 5.4 Reproducible sweep
 
+<!-- docs-test: skip - writes a sweep directory to the filesystem -->
 ```python
 from chaos_numerics.experiment import Experiment, cartesian_grid, run_sweep
 
@@ -398,12 +500,15 @@ result = run_sweep(
     experiment,
     parameters=cartesian_grid(
         kick_strength=[0.5, 1.0, 5.0],
-        steps=[1_000, 10_000],
+        steps=[20_000, 40_000],
     ),
-    output="results/standard-map",
+    output="results/public-api-standard-map",
     resume=True,
 )
 ```
+
+Each study owns its `output` directory: a directory already holding a different
+experiment or grid is rejected, not merged.
 
 ## 6. Naming conventions
 
@@ -412,11 +517,11 @@ result = run_sweep(
 | Packages/modules/functions/parameters | lowercase `snake_case` | `spectral_form_factor`, `kick_strength` |
 | Classes and protocols | `PascalCase`; no `I` prefix | `StandardMap`, `ClassicalMap` |
 | Result containers | descriptive noun, usually `Result` suffix | `AnalysisResult`, `EigenstateResult`; established nouns `Trajectory`, `Spectrum` omit it |
-| Configuration containers | descriptive noun plus `Config` | `UnfoldingConfig` |
+| Configuration containers | descriptive noun plus `Config` | `ExperimentConfig` (no v0.1 instance; the convention applies when one is added) |
 | Exceptions | `Error` suffix | `ValidationError`, `ConvergenceError` |
 | Warnings | `Warning` suffix | `NumericalWarning`, `ConvergenceWarning` |
-| Constants | uppercase `SNAKE_CASE` | `DEFAULT_DTYPE` |
-| Type aliases | singular `PascalCase` | `ClassicalState`, `ComplexState` |
+| Constants | uppercase `SNAKE_CASE` | `DEFAULT_DENSE_LIMIT` |
+| Type aliases | singular `PascalCase` | `ClassicalState`, `QuantumState`, `Ensemble` |
 | Private names | one leading underscore | `_validate_state` |
 
 Additional rules:
@@ -448,8 +553,9 @@ Additional rules:
 - Any leading axes are batch axes and are preserved by elementwise model methods.
 - Functions neither silently squeeze singleton axes nor reinterpret transposed
   inputs.
-- Outputs are NumPy arrays unless the documented result is a SciPy sparse matrix
-  or `LinearOperatorLike`.
+- Outputs are NumPy arrays unless the documented result is an immutable container
+  that conforms to `LinearOperatorLike` and exposes its SciPy sparse matrix through
+  a named attribute.
 - Result containers own their arrays and expose read-only views. Callers request an
   explicit copy before mutation.
 - Public results never rely on `numpy.matrix`.
@@ -521,6 +627,14 @@ Protocols specify behavior, not inheritance. KEN-112 implements the following
 v0.1 contracts with NumPy typing and separate runtime boundary validation:
 
 ```python
+from typing import Protocol
+
+import numpy as np
+from numpy.typing import ArrayLike, NDArray
+
+from chaos_numerics.core import LinearOperatorLike
+
+
 class ClassicalMap(Protocol):
     state_dim: int
     is_periodic: tuple[bool, ...]
@@ -611,7 +725,11 @@ mode for one minor release. Private APIs receive no deprecation period.
 
 - Future flows use the separate `core.Flow` protocol already required by KEN-112
   and receive a concrete module only when that scope begins. They must not add
-  dummy time arguments to `ClassicalMap`.
+  dummy time arguments to `ClassicalMap`. Flows are the named v0.2 candidate in
+  `mvp-scope.md` section 4, and the entry criterion recorded there is a design
+  document before an implementation: the integrator family, the error control, how
+  the variational equations are propagated, and how event detection meets a fixed
+  output grid are policy choices, and writing a solver settles none of them.
 - Future billiards need collision/event contracts distinct from both maps and
   flows; no v0.1 placeholder is created.
 - New classical or quantum maps implement a core protocol and live in the owning

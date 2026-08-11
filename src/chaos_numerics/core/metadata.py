@@ -75,6 +75,27 @@ class ConvergenceInfo:
                 _readonly_float(self.history, name="convergence history"),
             )
 
+    def __reduce__(
+        self,
+    ) -> tuple[type[ConvergenceInfo], tuple[object, ...]]:
+        """Round-trip through ``__init__`` so the history stays read-only.
+
+        NumPy drops the ``writeable=False`` flag when an array is pickled, so
+        rebuilding through the constructor is what keeps the documented
+        immutability after ``pickle`` or ``copy.deepcopy``.
+        """
+        return (
+            self.__class__,
+            (
+                self.converged,
+                self.iterations,
+                self.residual,
+                self.tolerance,
+                self.history,
+                self.reason,
+            ),
+        )
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ConvergenceInfo):
             return NotImplemented
@@ -138,6 +159,30 @@ class ExperimentMetadata:
         object.__setattr__(self, "warnings", warnings)
         if self.convergence is not None and not isinstance(self.convergence, ConvergenceInfo):
             raise ValidationError("convergence must be ConvergenceInfo or None")
+
+    def __reduce__(
+        self,
+    ) -> tuple[type[ExperimentMetadata], tuple[object, ...]]:
+        """Round-trip through ``__init__`` because ``mappingproxy`` cannot pickle.
+
+        ``parameters`` and ``environment`` are stored as :class:`MappingProxyType`
+        for immutability, and that type has no ``__reduce__``. Writing plain
+        dictionaries into the pickle state and re-freezing them in
+        ``__post_init__`` makes results usable with ``pickle``,
+        ``copy.deepcopy``, ``multiprocessing``, and ``joblib``.
+        """
+        return (
+            self.__class__,
+            (
+                _thaw_mapping(self.parameters),
+                self.precision,
+                self.seed,
+                _thaw_mapping(self.environment),
+                self.git_commit,
+                self.warnings,
+                self.convergence,
+            ),
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible dictionary without numerical arrays."""

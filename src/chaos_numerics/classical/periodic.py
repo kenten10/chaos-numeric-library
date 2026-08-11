@@ -17,7 +17,17 @@ from chaos_numerics.core import (
     ExperimentMetadata,
     ValidationError,
 )
-from chaos_numerics.core._validation import as_complex_array, as_float_array
+from chaos_numerics.core._payload import (
+    ArrayPayload,
+    add_convergence_history,
+    metadata_payload,
+)
+from chaos_numerics.core._validation import (
+    as_complex_array,
+    as_float_array,
+    validate_protocol,
+    wrap_into_half_open,
+)
 from chaos_numerics.core.types import ArrayLike, ComplexArray, FloatArray
 
 
@@ -67,6 +77,55 @@ class PeriodicOrbitResult:
     def count(self) -> int:
         return int(self.points.shape[0])
 
+    def array_payload(self) -> ArrayPayload:
+        """Return independent writable copies of every stored array."""
+        payload: ArrayPayload = {
+            "points": self.points.copy(),
+            "residuals": self.residuals.copy(),
+            "monodromy_matrices": self.monodromy_matrices.copy(),
+            "stability_multipliers": self.stability_multipliers.copy(),
+        }
+        add_convergence_history(payload, self.metadata)
+        return payload
+
+    def metadata_payload(self) -> dict[str, object]:
+        """Return the JSON descriptor, with array shapes but no array contents.
+
+        The descriptor must name every key ``array_payload`` produces, including the
+        convergence history. The storage layer matches the two against each other,
+        so an array present in one and absent from the other fails with a ``KeyError``
+        that says nothing about the cause.
+        """
+        arrays: ArrayPayload = {
+            "points": self.points,
+            "residuals": self.residuals,
+            "monodromy_matrices": self.monodromy_matrices,
+            "stability_multipliers": self.stability_multipliers,
+        }
+        add_convergence_history(arrays, self.metadata, copy=False)
+        return metadata_payload("periodic_orbits", self.metadata, arrays, period=self.period)
+
+    def __reduce__(self) -> tuple[type[PeriodicOrbitResult], tuple[object, ...]]:
+        """Rebuild through ``__init__`` so unpickled arrays stay read-only.
+
+        NumPy drops ``writeable=False`` when an array is pickled, and the default
+        route for a frozen slots dataclass restores the fields directly, so
+        ``pickle`` and ``copy.deepcopy`` both used to hand back a result whose
+        arrays were writable -- breaking the immutability every other container in
+        the library documents.
+        """
+        return (
+            self.__class__,
+            (
+                self.period,
+                self.points,
+                self.residuals,
+                self.monodromy_matrices,
+                self.stability_multipliers,
+                self.metadata,
+            ),
+        )
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, PeriodicOrbitResult):
             return NotImplemented
@@ -98,6 +157,7 @@ def find_periodic_orbits(
     strict: bool = False,
 ) -> PeriodicOrbitResult:
     """Find representative roots of ``F**period(x) - x`` from supplied guesses."""
+    validate_protocol(model, ClassicalMap, name="model")
     orbit_period = _positive_int(period, name="period")
     maximum_iterations = _positive_int(max_iterations, name="max_iterations")
     residual_tolerance = _positive_float(tolerance, name="tolerance")
@@ -202,8 +262,10 @@ def _periodic_residual(model: ClassicalMap, point: ArrayLike, period: int) -> Fl
     for coordinate in range(initial.size):
         if periodic[coordinate]:
             width = bounds[coordinate][1] - bounds[coordinate][0]
-            difference[coordinate] = (
-                np.mod(difference[coordinate] + 0.5 * width, width) - 0.5 * width
+            difference[coordinate] = wrap_into_half_open(
+                difference[coordinate],
+                lower=-0.5 * width,
+                upper=0.5 * width,
             )
     return difference
 
@@ -238,7 +300,11 @@ def _normalize(model: ClassicalMap, point: FloatArray) -> FloatArray:
         zip(model.bounds, model.is_periodic, strict=True)
     ):
         if periodic:
-            result[coordinate] = lower + np.mod(result[coordinate] - lower, upper - lower)
+            result[coordinate] = wrap_into_half_open(
+                result[coordinate],
+                lower=lower,
+                upper=upper,
+            )
     return result
 
 
@@ -249,7 +315,11 @@ def _wrapped_norm(model: ClassicalMap, difference: FloatArray) -> float:
     ):
         if periodic:
             width = upper - lower
-            adjusted[coordinate] = np.mod(adjusted[coordinate] + 0.5 * width, width) - 0.5 * width
+            adjusted[coordinate] = wrap_into_half_open(
+                adjusted[coordinate],
+                lower=-0.5 * width,
+                upper=0.5 * width,
+            )
     return float(np.linalg.norm(adjusted))
 
 

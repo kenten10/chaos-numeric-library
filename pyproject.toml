@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chaos-numerics"
-version = "0.1.0.dev0"
+dynamic = ["version"]
 description = "Numerical tools for reproducible experiments in classical and quantum chaos"
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -16,6 +16,7 @@ requires-python = ">=3.11,<3.15"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -23,14 +24,20 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
     "Typing :: Typed",
 ]
 dependencies = [
-    "numpy>=1.26.4",
-    "scipy>=1.17,<2",
+    "numpy>=1.26.4,<3",
+    # The floor is the oldest release the test suite is verified against, not the
+    # newest one available. scipy 1.18 requires Python 3.12, so a 1.17 floor would
+    # leave Python 3.11 users with exactly one usable minor version.
+    "scipy>=1.11.4,<2",
 ]
 
 [project.urls]
+Homepage = "https://github.com/kenten10/chaos-numeric-library"
+Documentation = "https://github.com/kenten10/chaos-numeric-library/blob/main/docs/api-reference.md"
 Repository = "https://github.com/kenten10/chaos-numeric-library"
 Issues = "https://github.com/kenten10/chaos-numeric-library/issues"
 Changelog = "https://github.com/kenten10/chaos-numeric-library/blob/main/CHANGELOG.md"
@@ -38,6 +45,7 @@ Security = "https://github.com/kenten10/chaos-numeric-library/security/policy"
 
 [project.optional-dependencies]
 test = [
+    "coverage[toml]>=7,<9",
     "pytest>=9,<10",
 ]
 dev = [
@@ -53,10 +61,18 @@ release = [
     "twine==7.0.0",
 ]
 
+[tool.hatch.version]
+# Single source of truth for the version. CITATION.cff carries a copy that
+# tests/test_package.py pins to this one.
+path = "src/chaos_numerics/_version.py"
+# The default regex does not match an annotated assignment, and the annotation is
+# worth keeping so that the constant stays typed for downstream users.
+pattern = '^__version__: Final = "(?P<version>[^"]+)"$'
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/chaos_numerics"]
 
-[tool.pytest]
+[tool.pytest.ini_options]
 minversion = "9.0"
 addopts = [
     "-ra",
@@ -64,6 +80,26 @@ addopts = [
     "--strict-markers",
 ]
 testpaths = ["tests"]
+# A library warning that no test asserts on is a warning nobody reads. Tests that
+# exercise a diagnostic must capture it with pytest.warns; the Markdown examples
+# in tests/test_documentation.py restore the default filters for their own scope,
+# because some of them deliberately provoke a diagnostic.
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["chaos_numerics"]
+
+[tool.coverage.report]
+# Measured at 88% with branch coverage on; this is a ratchet, not a target.
+fail_under = 87
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
 
 [tool.ruff]
 required-version = "==0.15.14"
@@ -84,12 +120,19 @@ select = [
     "UP",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# The notebooks are written in Japanese and print mathematical symbols such as
+# ell, alpha, and the multiplication sign. The ambiguous-unicode rules exist to
+# catch homoglyphs smuggled into ASCII source, which is not what is happening
+# here; every other lint rule still applies to notebook cells.
+"notebooks/*.ipynb" = ["RUF001", "RUF002", "RUF003"]
+
 [tool.ruff.format]
 docstring-code-format = true
 quote-style = "double"
 
 [tool.mypy]
-files = ["src", "tests"]
+files = ["benchmarks", "src", "tests"]
 strict = true
 extra_checks = true
 implicit_reexport = false

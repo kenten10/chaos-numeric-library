@@ -1,11 +1,103 @@
 {
-  "schema_version": 1,
-  "platform_policy": "CPython 3.11-3.14 CI, warmup once, median of three",
-  "thresholds_seconds": {
-    "batch_trajectory": 0.5,
-    "dense_eigenanalysis": 2.0,
-    "fft_evolution": 0.5,
-    "scalar_trajectory": 2.0,
-    "ulam_build": 1.0
-  }
+  "cases": {
+    "classical_batch_iterate": {
+      "allocation_note": "no extra full-size copy beyond the stored trajectory",
+      "inner_repeats": 46,
+      "iqr_seconds": 3.717821496336364e-05,
+      "mad_seconds": 2.1396295936859568e-05,
+      "median_seconds": 0.0020349098713663607,
+      "outer_repeats": 10,
+      "peak_allocation_bound_bytes": 2482176,
+      "peak_allocation_bytes": 888440,
+      "scaling": {
+        "check": "double steps",
+        "maximum_time_ratio": 2.6,
+        "time_ratio": 2.0220781904635676
+      }
+    },
+    "classical_scalar_iterate": {
+      "allocation_note": "no extra full-size copy beyond the stored trajectory",
+      "inner_repeats": 1,
+      "iqr_seconds": 0.0015624684747308493,
+      "mad_seconds": 0.0006413960363715887,
+      "median_seconds": 0.18337381235323846,
+      "outer_repeats": 10,
+      "peak_allocation_bound_bytes": 1920096,
+      "peak_allocation_bytes": 681210,
+      "scaling": {
+        "check": "double steps",
+        "maximum_time_ratio": 2.6,
+        "time_ratio": 2.0155987445256893
+      }
+    },
+    "dense_eigensystem": {
+      "allocation_note": "bounded number of simultaneous N x N temporaries",
+      "inner_repeats": 8,
+      "iqr_seconds": 0.0003112031117780134,
+      "mad_seconds": 0.0001741822634357959,
+      "median_seconds": 0.01292144533363171,
+      "outer_repeats": 10,
+      "peak_allocation_bound_bytes": 1769472,
+      "peak_allocation_bytes": 889136
+    },
+    "quantum_fft_evolve": {
+      "allocation_note": "no (N, N) allocation in the matrix-free path",
+      "inner_repeats": 75,
+      "iqr_seconds": 2.139639264593543e-05,
+      "mad_seconds": 1.3396668558319428e-05,
+      "median_seconds": 0.0013167491617302098,
+      "outer_repeats": 10,
+      "peak_allocation_bound_bytes": 8388608,
+      "peak_allocation_bytes": 395212,
+      "scaling": {
+        "check": "double N",
+        "maximum_time_ratio": 2.8,
+        "time_ratio": 2.1118608132621413
+      }
+    },
+    "sparse_leading_eigenpairs": {
+      "allocation_note": "no dense conversion of the sparse operator",
+      "inner_repeats": 3,
+      "iqr_seconds": 0.0010776458463321106,
+      "mad_seconds": 0.000479604195182521,
+      "median_seconds": 0.04905171529389918,
+      "outer_repeats": 10,
+      "peak_allocation_bound_bytes": 16777216,
+      "peak_allocation_bytes": 490943,
+      "scaling": {
+        "check": "double N",
+        "maximum_time_ratio": 3.5,
+        "time_ratio": 2.030708635370468
+      }
+    },
+    "ulam_build": {
+      "allocation_note": "no (cell_count, cell_count) dense allocation",
+      "inner_repeats": 6,
+      "iqr_seconds": 0.00037965283263474703,
+      "mad_seconds": 0.0002174722418809942,
+      "median_seconds": 0.016603979165665805,
+      "outer_repeats": 10,
+      "peak_allocation_bound_bytes": 67108864,
+      "peak_allocation_bytes": 104056,
+      "scaling": {
+        "check": "double samples_per_cell",
+        "maximum_time_ratio": 2.8,
+        "time_ratio": 1.0653113963471639
+      }
+    }
+  },
+  "environment": {
+    "chaos_numerics": "0.1.0.dev0",
+    "machine": "arm64",
+    "numpy": "2.5.1",
+    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "python": "3.14.0",
+    "runner_class": "Darwin-arm64",
+    "scipy": "1.18.0",
+    "threads": {
+      "OMP_NUM_THREADS": "1"
+    }
+  },
+  "mode": "smoke",
+  "schema_version": 2
 }

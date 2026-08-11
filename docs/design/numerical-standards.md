@@ -153,7 +153,9 @@ mode raises `ConvergenceError`.
 | --- | --- | --- |
 | Autocorrelation | Constant, delta, alternating, and directly summed short series | `rtol=1e-12`, `atol=1e-14`; lag-zero normalization exactly documented. |
 | Mean-square displacement | Constant velocity and seeded random walk | Deterministic case `rtol=1e-12`; stochastic ensemble mean within `5` estimated standard errors. |
-| Local diffusion exponent | Synthetic power laws over a fixed fit interval | Absolute slope error `<= 5e-3`; result records interval, sample count, and fit residual. |
+| Local diffusion exponent, central value | Synthetic power laws over a fixed fit interval | Absolute slope error `<= 5e-3`; result records interval, sample count, and fit residual. |
+| Local diffusion exponent, reported error | 200 realizations of two known exponents: a unit random walk (`alpha = 1`) and fractional Brownian motion with `H = 0.75` (`alpha = 1.5`) | Ratio of the true estimator spread to the reported uncertainty in `[0.5, 2]`, and at most `20%` of realizations further than two reported errors from the truth. Measured `0.95`-`1.19` and `3.0%`-`11.5%`. |
+| Mean-square displacement, reported error | 200-400 realizations of unit random walks of 2000 steps, whose MSD is exactly `<dx**2> = t` | Ratio of the true estimator spread to the reported uncertainty in `[0.5, 2]`, and at most `20%` of realizations further than two reported errors from the truth. Measured `0.98`-`1.13` and `4.5%`-`9.5%` for the batch standard error over lags `1`-`500` at `batch = 16`. The retired time-origin standard error measured `1.05`-`20.87` and `4.8%`-`90.0%` over the same lags and fails at every lag from `5` upwards. |
 | Periodic orbit | `||F^period(x) - x||_2` using wrapped displacement | `<= max(user_tol, 1e-10)` for a successful result. |
 | Monodromy matrix | Product of independently evaluated Jacobians | `rtol=1e-10`, `atol=1e-12` for low periods covered by v0.1. |
 | Stability multipliers | Eigenpair residual of monodromy matrix | `<= 1e-10`. |
@@ -161,7 +163,41 @@ mode raises `ConvergenceError`.
 Fits with fewer than three valid points, rank deficiency, a non-finite slope, or a
 window outside the available data raise `ValidationError`. A valid fit that fails
 its requested conditioning/convergence target returns diagnostics and emits
-`NumericalWarning`.
+`NumericalWarning`, and so does a fit whose error cannot be calibrated.
+
+The error criterion is a criterion because the obvious estimator fails it. A
+least-squares standard error assumes independent residuals, and a
+time-origin-averaged MSD is a smooth curve whose adjacent lags are strongly
+correlated, so the residuals are tiny and the error bar comes out about `30` times
+too small: measured on a unit random walk, the true spread of the exponent was
+`0.142` against a reported `0.005`, and `93%` of realizations sat more than two
+reported errors from the true value where `5%` was expected. Feeding a batch of
+trajectories did not help, because the same correlated-residual fit was applied to
+the ensemble-averaged curve. Block jackknife and Newey-West estimators were
+measured as well and reached ratios of only `1.5`-`9.9`.
+
+The contract is therefore: with an ensemble the reported uncertainty is the
+standard error of the mean across independent trajectories -- over per-curve fits
+for the exponent, over per-trajectory curves for the MSD and the autocorrelation
+-- and **with a single curve or a single trajectory the uncertainty is `None`**
+together with a `NumericalWarning`, because one curve carries no information about
+the spread of its own value. Every result records what its error means in
+`metadata.parameters["error_semantics"]`.
+
+`mean_square_displacement` used to escape that contract by reporting the scatter
+over the time origins of one trajectory, which is the same failure one level down:
+the origins of a time-origin-averaged curve are not independent draws. Measured
+against the exact `<dx**2> = t`, it understated the true spread by factors of
+`1.0`, `2.6`, `8.8` and `20.9` at lags `1`, `10`, `100` and `500`, leaving `4.8%`,
+`46%`, `82%` and `90%` of realizations more than two of its sigma from the truth.
+The estimator is gone rather than deprecated, and a regression test recomputes it
+on the same input to assert that it would still fail, so restoring it fails the
+suite. The batch path it was replaced by was already calibrated and is unchanged.
+
+Overflow in the squared or fourth-power accumulation raises `NumericalError`
+naming the coordinate magnitude, the representable limit, and the remedy, in place
+of leaking a bare `RuntimeWarning` followed by a generic non-finite
+`ValidationError`. This matches the Lyapunov overflow policy in section 4.2.
 
 ## 5. Partitions and Ulam operators
 
@@ -180,12 +216,16 @@ its requested conditioning/convergence target returns diagnostics and emits
 The v0.1 convention is column-stochastic:
 `P[target, source] = Pr(target | source)`.
 
+`P` below is a `UlamMatrix`. Its CSR arrays are reached through `P.matrix`; the
+container itself forwards only the operator surface (`shape`, `dtype`, `nnz`,
+`matvec`, `toarray()`, `@`).
+
 | Quantity | Closed-system acceptance | Notes |
 | --- | ---: | --- |
-| Entry non-negativity | `min(P.data) >= -1e-15` | Count-derived construction should normally be exactly nonnegative; tolerance catches sparse arithmetic roundoff. |
+| Entry non-negativity | `min(P.matrix.data) >= -1e-15` | Count-derived construction should normally be exactly nonnegative; tolerance catches sparse arithmetic roundoff. |
 | Probability conservation | `probability_defect(P) <= 1e-12` | About `4.5e3 * eps`; well above summation noise but far below a missing transition. |
-| Entry upper bound | `max(P.data) <= 1 + 1e-15` | A count cannot exceed samples per source cell. |
-| Open-system mass accounting | Every column sum is in `[-1e-15, 1 + 1e-12]`; reported escape probability agrees with `1 - column_sum` within `1e-12` | Open behavior requires explicit `open_system=True`; a closed build treats escape as an error. |
+| Entry upper bound | `max(P.matrix.data) <= 1 + 1e-15` | A count cannot exceed samples per source cell. |
+| Open-system mass accounting | Reported escape probability agrees with `1 - column_sum` within `1e-12` | Open behavior requires explicit `open_system=True`; a closed build treats escape as an error. Column sums no greater than one are enforced by the `UlamMatrix` constructor, so substochasticity is an invariant of the type rather than a per-consumer check. |
 | Dense/CSR equality | `rtol=0`, `atol=0` when built from the same count table | Conversion/storage must not change values. |
 | Independent dense vs CSR build | `rtol=1e-13`, `atol=1e-15` with identical predetermined samples | Detects orientation/indexing errors without conflating RNG order. |
 | Stationary density normalization | `abs(sum(rho) - 1) <= 1e-12` | Density uses the documented column-vector convention. |
@@ -238,12 +278,14 @@ diagnostic `NumericalWarning` only when it makes a requested statistic ambiguous
 | Feature | Validation | Acceptance |
 | --- | --- | --- |
 | Phase wrapping/sorting | Hand-constructed endpoint and duplicate cases | Wrapped interval and order exact apart from `atol=1e-14` at the boundary. |
-| Unfolding | Synthetic polynomial counting function | Mean unfolded spacing `1 +/- 1e-10`; reconstruction residual matches configured fit tolerance. |
+| Unfolding | Synthetic polynomial counting function | Reconstruction residual matches the configured fit tolerance, and the interior spacings are checked independently. A unit mean unfolded spacing is **not** an acceptance criterion: for both methods it follows algebraically from the circular spacings summing to the period over `count` levels. `method="polynomial"` additionally fixes the single wrap-around spacing at exactly `1` by construction, which the result records as `circular_gap_is_synthetic`. |
 | Adjacent-gap ratios | Hand-computed small arrays | `rtol=1e-13`, `atol=1e-14`; zero gaps follow the documented degeneracy policy. |
-| Spacing distribution | Counts and normalization | Counts exact; integrated density within `1e-12` of one when normalization is requested. |
+| Spacing distribution | Counts and normalization | Counts exact; with `density=True` the histogram is normalized by the total sample count, so the integral equals one within `1e-12` only when `value_range` covers every spacing, and is otherwise the fraction inside the range. |
 | Spectral form factor | Direct complex-sum reference at small `N` | `rtol=1e-12`, `atol=1e-14` for the same window/normalization. |
-| Number variance | Direct sliding-window reference | `rtol=1e-11`, `atol=1e-13`. |
+| Number variance | Direct sliding-window reference, plus the closed form for an equally spaced spectrum | `rtol=1e-11`, `atol=1e-13` against the reference; `atol=1e-12` against `frac(L) * (1 - frac(L))`. Window origins sit on a half-shifted grid so that a `samples` value commensurate with the level count cannot land on a level and miscount by one. |
 | Poisson/RMT ensembles | Seeded ensemble reference | Absolute error is both within `5` reported standard errors and `<= 0.02`. |
+| Spacing-distribution reference | Analytic identities of the Wigner surmise | `int P(s) ds = 1` and `int s P(s) ds = 1` to `rtol=1e-6`; closed-form peak positions to `rtol=1e-12`. Comparing a measured histogram against the surmise is counting-noise limited: at 20 bins over `[0, 4)` the systematic surmise-versus-exact difference stays under `0.02`, below the noise of any tractable sample, so acceptance uses `0.075` and additionally requires the wrong symmetry class to be rejected. |
+| Mean gap-ratio reference | Published large-`N` and 3x3 surmise values | Constants exact to their quoted digits; a seeded ensemble reproduces the large-`N` value within `0.012`, about five standard errors at 200 matrices of dimension 64. |
 | Husimi distribution | Quadrature normalization | `abs(integral - 1) <= 1e-10`. |
 | IPR, participation, entropy | Basis-localized and uniform states | IPR/participation `rtol=1e-12`, `atol=1e-14`; entropy absolute error `<= 1e-12`. |
 
@@ -325,6 +367,61 @@ dependency versions, or parallel reductions. In those cases compare invariant
 quantities, residuals, subspaces, and statistical summaries using this document's
 tolerances.
 
+It is also not promised **within one process for complex elementwise arithmetic on
+the oldest supported NumPy**. Measured on NumPy 1.26.4 with CPython 3.11, the
+complex128 phase product inside one kicked-rotor Floquet step returns different
+results on repeated calls with the same input array: eight invocations spread over
+`2e-17`, and two `evolve` runs with identical arguments differed by `3e-16`. The
+same code on NumPy 2.5 is bit-stable, and `numpy.fft` alone is bit-stable on both.
+Tests therefore compare complex phase and FFT pipelines at rounding level rather
+than with `assert_array_equal`.
+
+The same difference shows up in absolute tolerances that were set from one NumPy
+version. The unitarity defect of the Weyl translation operators measures `0.38 eps`
+on NumPy 2.5 and `0.72 eps` on NumPy 1.26 over the same dimension and boundary-phase
+grid, so a `1e-16` bound passed on one and failed on the other while both are pure
+rounding in a single complex exponential. Bounds on quantities whose only error is
+rounding are therefore stated as multiples of `numpy.finfo(numpy.float64).eps`, not
+as absolute constants; an absolute constant below a few `eps` pins a NumPy build
+rather than the library.
+
+#### What this means when writing a test
+
+Four assertions in this suite passed on the development machine and failed in CI,
+each because they pinned a property of one machine rather than of the library. The
+patterns are worth naming, because a green local run is not evidence against any of
+them:
+
+- **A reduction whose order is an implementation choice is not bit-reproducible.**
+  Changing `chunk_size` changes the shape of the array handed to the matrix
+  product, so BLAS blocks it differently and the sums land differently. Compare
+  such results at rounding level, and bound the difference against the **peak** of
+  the array rather than per element: a Husimi tail cell at `1e-10` beside a peak at
+  `30` moves by an absolute `7e-18`, which is a relative `1e-11`, so a per-element
+  `rtol` rejects a correct result. Genuine memoization -- same inputs, cache on
+  versus off -- *is* bit-exact and should be asserted with `assert_array_equal`.
+- **`argmax` over a tie is decided by the implementation.** A coherent state
+  centered at `0.25` on a 64-cell midpoint grid sits exactly between two cells
+  that hold bit-identical values. Assert that the peak lies within one cell of the
+  requested point, or first assert that there is no tie
+  (`sum(values >= values.max() - eps) == 1`) and only then pin the cell.
+- **A finite-time quantity from a single chaotic orbit is not reproducible at all.**
+  Rounding differences are amplified by `exp(lambda t)`, so two machines following
+  "the same" orbit have diverged completely within a few hundred steps. Use a
+  phase-space mean over an ensemble and size the tolerance from the spread across
+  orbit sets. Where an exact answer is wanted, pin a quantity that does not depend
+  on the orbit, as `tests/test_lyapunov.py` does by using a fixed point whose
+  Jacobian is constant.
+- **Complex elementwise arithmetic is not reproducible call to call on the floor**,
+  per the paragraphs above.
+
+Seeded reproducibility is unaffected and is asserted at the floor: Lyapunov
+exponents, Ulam matrices, stationary densities, spectral statistics, and sweep child
+seeds all reproduce bit for bit across processes and thread counts on both the
+newest and the oldest supported dependency set. What the floor does not support is a
+bit-exact comparison between two complex-valued results computed from
+equal-but-distinct arrays.
+
 ### 10.2 Failure and warning behavior
 
 | Situation | Default behavior |
@@ -365,19 +462,24 @@ allocations remain blocking wherever measurement is reliable.
 
 ### 12.1 Benchmark cases
 
-| ID | Capability | Standard case | Report |
-| --- | --- | --- | --- |
-| `classical_scalar_iterate` | Scalar orbit | Standard map, `100_000` steps, history enabled | median time, steps/s, peak RSS |
-| `classical_batch_iterate` | Batch orbit | Standard map, batch `1_024`, `1_000` steps, history enabled | median time, states/s, peak RSS |
-| `ulam_build` | CSR Ulam construction | Cat map, `64 x 64` cells, `128` samples/cell, fixed seed | median time, samples/s, `nnz`, peak RSS |
-| `quantum_fft_evolve` | Matrix-free evolution | Kicked rotor, `N=16_384`, `100` steps, fixed state | median time, steps/s, peak RSS, norm drift |
-| `dense_eigensystem` | Dense reference eigensystem | Seeded unitary, `N=256`, full spectrum | median time, peak RSS, max residual |
-| `sparse_leading_eigenpairs` | Sparse eigenanalysis | Fixed seeded stochastic sparse matrix, `N=4_096`, about `9` nonzeros/column, `count=8` | median time, matvec count, peak RSS, max residual |
+| ID | Capability | Standard case | Smoke case | Report |
+| --- | --- | --- | --- | --- |
+| `classical_scalar_iterate` | Scalar orbit | Standard map, `100_000` steps | `20_000` steps | median time, MAD, IQR, peak allocation |
+| `classical_batch_iterate` | Batch orbit | Standard map, batch `1_024`, `1_000` steps | batch `256`, `100` steps | median time, MAD, IQR, peak allocation |
+| `ulam_build` | CSR Ulam construction | Cat map, `64 x 64` cells, `128` samples/cell, fixed seed | `16 x 16` cells, `64` samples/cell | median time, MAD, IQR, peak allocation |
+| `quantum_fft_evolve` | Matrix-free evolution | Kicked rotor, `N=16_384`, `100` steps, fixed state | `N=4_096`, `20` steps | median time, MAD, IQR, peak allocation |
+| `dense_eigensystem` | Dense reference eigensystem | Seeded unitary, `N=256`, full spectrum | `N=96` | median time, MAD, IQR, peak allocation |
+| `sparse_leading_eigenpairs` | Sparse eigenanalysis | Fixed seeded stochastic sparse matrix, `N=4_096`, about `9` nonzeros/column, `count=8` | `N=1_024` | median time, MAD, IQR, peak allocation |
 
-Smaller smoke variants run on ordinary pull requests. The standard cases run on
-the pinned benchmark job and before release. Benchmark fixtures, seeds, thread
-counts, dependency versions, CPU identity, and power/performance settings are
-recorded with the result.
+`benchmarks/benchmark_suite.py --mode smoke` runs the smoke variants on ordinary
+pull requests; `--mode standard` runs the standard cases on the pinned benchmark
+job and before release. Benchmark fixtures, seeds, thread counts, dependency
+versions, and a coarse runner class are recorded with the result.
+
+Peak memory is reported as the `tracemalloc` peak of traced Python allocations,
+which is what the "must not allocate a dense `(N, N)` array" gates need and is
+portable across the supported platforms. Native peak RSS remains deferred; see
+section 14.
 
 ### 12.2 Timing protocol and regression gate
 
@@ -394,8 +496,29 @@ A timing regression fails the pinned job when both conditions hold:
 
 ```text
 candidate_median > 1.30 * baseline_median
-candidate_median - baseline_median > max(5 ms, 6 * baseline_MAD)
+candidate_median - baseline_median > max(50 us, 6 * baseline_MAD)
 ```
+
+The absolute floor was 5 ms in an earlier revision, which turned out to silence
+the regressions it was meant to survive. Because short cases are aggregated to at
+least 100 ms per sample, their medians are not timer-resolution limited, and a
+5 ms floor sat far above them: at the recorded smoke medians it allowed
+`quantum_fft_evolve` to degrade 4.8x and `classical_batch_iterate` 3.5x without
+failing. With a 50 us floor the `6 * MAD` term is the binding one, as intended,
+and every recorded case now fails at the documented 1.30x.
+
+Only `--check-timing` makes that gate blocking, and it is reserved for the pinned
+runner. The recorded baseline carries the runner class it was measured on, and the
+timing comparison is skipped outright when the current runner class or the
+benchmark mode differs.
+
+That policy has a consequence worth stating plainly: **no timing comparison
+happens in CI today.** The committed baseline was recorded on `Darwin-arm64` and
+the shared runner is `Linux-x86_64`, so every case reports `NEW` and nothing is
+compared. Timing regressions are caught only once a pinned runner records its own
+baseline and runs with `--check-timing`. Until then the suite's blocking value
+comes entirely from the allocation and scaling gates, which are deterministic and
+block on every runner.
 
 A change above `15%` that does not cross the hard gate is reported as a warning.
 The dual `30%` and variability threshold avoids failing on ordinary runner noise
@@ -415,6 +538,46 @@ five stable candidate runs.
 These ratios are guardrails, not asymptotic proofs. They include room for cache and
 solver-iteration changes but reject obvious quadratic dense behavior in paths that
 must scale. Scaling gates run on the pinned runner with at least three size pairs.
+
+### 12.4 Known scaling limits in v0.1
+
+The gates above check the ratio that each capability promises. They do not claim
+that every path is as fast as it could be, and two limits are worth stating so that
+a user does not discover them as an apparent hang.
+
+**Ulam construction is quadratic in the cell count.** `build_ulam` allocates and
+scans an array of length `cell_count` once per source cell, so the cost is
+`O(cell_count**2)` independently of `samples_per_cell`. Measured on an Apple
+Silicon laptop with a Cat map:
+
+| Partition | Cells | Samples/cell | Wall time | CSR size |
+| --- | --- | --- | --- | --- |
+| `32 x 32` | 1,024 | 256 | 0.09 s | 0.10 MB |
+| `64 x 64` | 4,096 | 256 | 0.42 s | 0.43 MB |
+| `128 x 128` | 16,384 | 256 | 1.66 s | 1.75 MB |
+| `256 x 256` | 65,536 | 64 | 10.4 s | 6.45 MB |
+
+The empirical fit is `t ~ cells * (70 us + 1.45 ns * cells)`, which puts
+`512 x 512` near two minutes and `1024 x 1024` near half an hour. Treat
+`256 x 256` as the practical ceiling until the accumulation is rewritten as a
+single COO build, which is linear in `cell_count * samples_per_cell`.
+
+A corollary is that **raising `samples_per_cell` is nearly free**: the fixed
+per-cell cost dominates, so `64 x 64` with 256 samples per cell costs 1.25 times
+what 64 samples per cell costs while giving four times the sampling statistics.
+There is no reason to run with a small `samples_per_cell`.
+
+**Correlation and displacement statistics are quadratic in the series length**
+when they run their direct reference algorithm, because the default `max_lag` is
+`count - 1`. `method="direct"` is that reference algorithm and is what the
+acceptance criteria above are stated against; `method="fft"` computes the same
+quantity through Wiener-Khinchin in `O(n log n)`, and `method="auto"` (the default)
+selects it once `time * max_lag` exceeds 250,000. The two agree to `1e-13`
+relative on bounded coordinates. The fourth-moment uncertainty estimator loses more
+precision in the FFT path, `5e-5` relative on unwrapped coordinates against `2e-15`
+on bounded ones, because it evaluates a fourth moment through a correlation rather
+than a direct sum; use `method="direct"` when that uncertainty is the reported
+quantity.
 
 Peak memory uses process RSS or an equivalent native-allocation-aware measure;
 `tracemalloc` alone is insufficient for NumPy/SciPy buffers. Tests additionally

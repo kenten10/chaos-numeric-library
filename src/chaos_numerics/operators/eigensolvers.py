@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import warnings as python_warnings
-from typing import Any, Literal
+from typing import Any, Final, Literal, TypeAlias, get_args
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.sparse import issparse  # type: ignore[import-untyped]
 from scipy.sparse.linalg import (  # type: ignore[import-untyped]
     ArpackNoConvergence,
@@ -23,16 +24,42 @@ from chaos_numerics.core import (
     Diagnostic,
     ExperimentMetadata,
     NumericalError,
+    NumericalWarning,
     Spectrum,
     ValidationError,
 )
+from chaos_numerics.operators.ulam import UlamMatrix
+
+Side: TypeAlias = Literal["right", "left"]
+"""Which eigenvectors to solve for; the error messages enumerate these."""
+
+OperatorLike: TypeAlias = UlamMatrix | NDArray[np.number[Any]]
+"""What the v0.1 eigensolvers accept: a square dense NumPy array, a
+:class:`~chaos_numerics.operators.UlamMatrix`, or any SciPy sparse matrix.
+
+SciPy sparse classes cannot be named in this alias because SciPy ships no type
+stubs, which also means they are ``Any`` to a type checker and pass regardless.
+A :class:`~chaos_numerics.operators.UlamMatrix` is unwrapped to its ``.matrix``
+once, at entry, so every solver path below works on a SciPy sparse matrix and
+nothing here depends on what that class forwards.
+:class:`~chaos_numerics.core.LinearOperatorLike` is deliberately absent: these
+solvers need ``operator.T.conjugate()``, ``@`` against dense vectors, a matrix
+norm, and ``toarray()`` on the dense fallback, so a purely matrix-free operator
+raises instead of solving. Nested sequences are rejected as well, because
+``operator.shape`` is read directly rather than through ``np.asarray``."""
+
+_SIDES: Final[tuple[str, ...]] = get_args(Side)
+
+# Dense fallbacks below this size are not worth a warning; above it the silent
+# sparse-to-dense expansion is the dominant cost of the call.
+_DENSE_FALLBACK_BYTES_LIMIT: Final = 1 << 20
 
 
 def leading_eigenpairs(
-    operator: Any,
+    operator: OperatorLike,
     *,
     count: int = 6,
-    side: Literal["right", "left"] = "right",
+    side: Side = "right",
     tolerance: float = 1e-10,
     max_iterations: int | None = None,
     strict: bool = False,
@@ -41,23 +68,45 @@ def leading_eigenpairs(
 
     Right vectors satisfy ``P @ v = lambda * v``. Left vectors are stored as
     columns and satisfy ``P.H @ w = conj(lambda) * w``.
+
+    ``count >= dimension - 1`` cannot be served by ARPACK, so such a request
+    falls back to a dense ``complex128`` eigendecomposition of the whole
+    operator; a sparse operator large enough for that to matter emits
+    :class:`~chaos_numerics.core.NumericalWarning` with the memory estimate.
+
+    ``strict`` defaults to ``False`` here and to ``True`` in
+    :func:`stationary_density` and :func:`spectral_gap`. The rule across these
+    three functions is that ``strict`` defaults to ``True`` wherever convergence
+    determines what the returned number means -- an invariant density or a
+    spectral gap read off an unconverged eigenpair is a different quantity, not
+    a less accurate one -- and to ``False`` here, where a partially converged
+    spectrum returned together with its per-pair residuals is still a legitimate
+    object to inspect. With ``strict=False`` non-convergence surfaces as
+    :class:`~chaos_numerics.core.ConvergenceWarning`, a ``Diagnostic`` in
+    ``metadata.warnings``, and ``metadata.convergence.converged is False``;
+    with ``strict=True`` it raises :class:`~chaos_numerics.core.ConvergenceError`.
     """
     dimension = _operator_dimension(operator)
     pair_count = _positive_int(count, name="count")
     if pair_count > dimension:
         raise ValidationError(f"count must not exceed operator dimension {dimension}")
-    if side not in {"right", "left"}:
-        raise ValidationError(f"side must be 'right' or 'left'; got {side!r}")
+    if side not in _SIDES:
+        options = ", ".join(repr(option) for option in _SIDES)
+        raise ValidationError(f"side must be one of {options}; got {side!r}")
     solver_tolerance = _positive_float(tolerance, name="tolerance")
     if max_iterations is not None:
         max_iterations = _positive_int(max_iterations, name="max_iterations")
     if not isinstance(strict, bool):
         raise ValidationError(f"strict must be a bool; got {strict!r}")
 
-    solved_operator = operator.T.conjugate() if side == "left" else operator
+    # The public signature stays precise while the solver body keeps duck-typing
+    # over SciPy's untyped sparse classes and dense arrays alike.
+    raw_operator: Any = _solver_operator(operator)
+    solved_operator: Any = raw_operator.T.conjugate() if side == "left" else raw_operator
     method = "dense" if pair_count >= dimension - 1 else "arpack"
     partial = False
     if method == "dense":
+        _warn_on_dense_fallback(solved_operator, dimension=dimension, count=pair_count)
         dense = _dense_array(solved_operator)
         values, vectors = np.linalg.eig(dense)
     else:
@@ -86,7 +135,7 @@ def leading_eigenpairs(
     order = _eigenvalue_order(values)[:pair_count]
     values = values[order]
     vectors = _normalize_columns(vectors[:, order])
-    residuals = _eigenpair_residuals(operator, values, vectors, side=side)
+    residuals = _eigenpair_residuals(raw_operator, values, vectors, side=side)
     residual_limit = 1e-12 if method == "dense" else max(solver_tolerance, 1e-9)
     converged = (
         not partial and values.size == pair_count and bool(np.all(residuals <= residual_limit))
@@ -132,13 +181,23 @@ def leading_eigenpairs(
 
 
 def stationary_density(
-    operator: Any,
+    operator: OperatorLike,
     *,
     tolerance: float = 1e-10,
     max_iterations: int | None = None,
     strict: bool = True,
 ) -> AnalysisResult:
-    """Return the normalized right eigenvector whose eigenvalue is nearest one."""
+    """Return the normalized right eigenvector whose eigenvalue is nearest one.
+
+    ``strict`` defaults to ``True`` because convergence decides what this vector
+    means: an eigenvector that does not satisfy ``P @ rho == rho`` is not a
+    coarser invariant density, it is not an invariant density. See
+    :func:`leading_eigenpairs` for the shared rule behind the differing
+    ``strict`` defaults of these three functions. With ``strict=False`` the
+    invariance and eigenvalue-one failures are reported through
+    :class:`~chaos_numerics.core.ConvergenceWarning` and
+    ``metadata.convergence`` instead of raising.
+    """
     dimension = _operator_dimension(operator)
     spectrum = leading_eigenpairs(
         operator,
@@ -165,7 +224,9 @@ def stationary_density(
     if float(np.min(density)) < -1e-12:
         raise NumericalError(f"stationary density has negative entry {float(np.min(density))}")
     density /= np.sum(density)
-    invariance = float(np.linalg.norm(_matvec(operator, density) - density, ord=1))
+    invariance = float(
+        np.linalg.norm(_matvec(_solver_operator(operator), density) - density, ord=1)
+    )
     eigenvalue_error = float(abs(eigenvalue - 1.0))
     limit = max(_positive_float(tolerance, name="tolerance"), 1e-10)
     eigenpairs_converged = (
@@ -181,7 +242,14 @@ def stationary_density(
     if not converged and not strict:
         message = "stationary density did not satisfy invariance or eigenvalue tolerance"
         python_warnings.warn(message, ConvergenceWarning, stacklevel=2)
-        diagnostics = (*diagnostics, Diagnostic("stationary-density-not-converged", message))
+        # The category is spelled out rather than defaulted: this is the same kind
+        # of failure as the ``eigenpairs-not-converged`` diagnostic above, and
+        # letting it default to "numerical" would file it under a different label
+        # than every other convergence diagnostic in the library.
+        diagnostics = (
+            *diagnostics,
+            Diagnostic("stationary-density-not-converged", message, category="convergence"),
+        )
     convergence = ConvergenceInfo(
         converged=converged,
         iterations=0,
@@ -204,13 +272,23 @@ def stationary_density(
 
 
 def spectral_gap(
-    operator_or_spectrum: Any,
+    operator_or_spectrum: OperatorLike | Spectrum,
     *,
     tolerance: float = 1e-10,
     max_iterations: int | None = None,
     strict: bool = True,
 ) -> AnalysisResult:
-    """Return the Markov spectral gap ``1 - abs(lambda_2)``."""
+    """Return the Markov spectral gap ``1 - abs(lambda_2)``.
+
+    A :class:`~chaos_numerics.core.Spectrum` is reused as given; anything else is
+    passed to :func:`leading_eigenpairs` with ``count=2``.
+
+    ``strict`` defaults to ``True`` because convergence decides what the returned
+    number means: a gap computed from an unconverged ``lambda_2`` describes a
+    different relaxation rate rather than the same one less precisely. See
+    :func:`leading_eigenpairs` for the shared rule behind the differing
+    ``strict`` defaults of these three functions.
+    """
     spectrum = (
         operator_or_spectrum
         if isinstance(operator_or_spectrum, Spectrum)
@@ -250,7 +328,43 @@ def spectral_gap(
     return AnalysisResult("spectral_gap", np.asarray([gap], dtype=np.float64), metadata=metadata)
 
 
-def _operator_dimension(operator: Any) -> int:
+def _solver_operator(operator: OperatorLike) -> Any:
+    """Return the SciPy sparse matrix or dense array the solver paths operate on.
+
+    :class:`~chaos_numerics.operators.UlamMatrix` is composed of a ``csr_matrix``
+    rather than being one, and it forwards only a small read-only surface. It is
+    therefore unwrapped exactly once here, so that ``issparse``, ``.T``,
+    ``toarray()`` and the sparse norm below keep seeing a real SciPy matrix.
+    """
+    return operator.matrix if isinstance(operator, UlamMatrix) else operator
+
+
+def _warn_on_dense_fallback(operator: Any, *, dimension: int, count: int) -> None:
+    """Announce the sparse-to-dense cliff taken when ARPACK cannot serve ``count``.
+
+    ARPACK requires ``count < dimension - 1``, so a larger request is answered by
+    a dense ``complex128`` eigendecomposition of the whole operator. For a sparse
+    operator that is a discontinuity in cost rather than a gradual slowdown -- a
+    0.11 MB CSR of dimension 800 becomes a 10.2 MB dense array, and the 16384
+    cells of a (128, 128) Ulam partition become 4.3 GB -- so it must not happen
+    silently.
+    """
+    if not issparse(operator):
+        return
+    required_bytes = dimension * dimension * np.dtype(np.complex128).itemsize
+    if required_bytes <= _DENSE_FALLBACK_BYTES_LIMIT:
+        return
+    python_warnings.warn(
+        f"count={count} is not below dimension-1={dimension - 1}, so ARPACK cannot be used and "
+        f"the sparse operator is expanded into a dense {dimension}x{dimension} complex128 array "
+        f"of about {required_bytes / 1024**2:.1f} MiB, plus LAPACK workspace, for a dense "
+        f"eigendecomposition; pass count<={dimension - 2} to keep the sparse ARPACK path",
+        NumericalWarning,
+        stacklevel=3,
+    )
+
+
+def _operator_dimension(operator: OperatorLike) -> int:
     shape = getattr(operator, "shape", None)
     if not isinstance(shape, tuple) or len(shape) != 2 or shape[0] != shape[1]:
         raise ValidationError(f"operator must be square; got shape {shape}")
@@ -346,4 +460,4 @@ def _positive_float(value: object, *, name: str) -> float:
     return result
 
 
-__all__ = ["leading_eigenpairs", "spectral_gap", "stationary_density"]
+__all__ = ["OperatorLike", "Side", "leading_eigenpairs", "spectral_gap", "stationary_density"]

@@ -1,7 +1,7 @@
 """Runtime validation kept separate from static protocol definitions."""
 
 from collections.abc import Sequence
-from typing import Any, TypeAlias, cast
+from typing import Any, Generic, Protocol, TypeAlias, cast
 
 import numpy as np
 
@@ -124,6 +124,71 @@ def validate_positive_int(value: IntegerLike, *, name: str) -> int:
     if result <= 0:
         raise ValidationError(f"{name} must be positive; got {result}")
     return result
+
+
+def validate_protocol(value: object, protocol: type, *, name: str) -> None:
+    """Reject objects that do not structurally implement a runtime protocol.
+
+    Every public entry point uses this so that a missing attribute surfaces as
+    :class:`ValidationError` naming the protocol, never as a bare
+    ``AttributeError`` raised deep inside an algorithm.
+    """
+    if not isinstance(value, protocol):
+        missing = sorted(
+            member for member in _protocol_members(protocol) if not hasattr(value, member)
+        )
+        detail = f"; missing {', '.join(missing)}" if missing else ""
+        raise ValidationError(
+            f"{name} must implement the {protocol.__name__} protocol; "
+            f"got {type(value).__name__}{detail}"
+        )
+
+
+def _protocol_members(protocol: type) -> set[str]:
+    """Return the member names a protocol requires.
+
+    CPython exposes this as ``__protocol_attrs__``, but only from 3.12 onwards, and
+    it is private in any case. Deriving the names from the class body keeps the
+    error message identical on every supported interpreter instead of silently
+    dropping the useful half of it on 3.11.
+
+    The derivation keeps only names without a leading underscore. Every name a
+    protocol class body carries that is *not* one of its members is either a
+    dunder or an implementation flag such as ``_is_protocol``, and each new
+    CPython adds more of them -- 3.12 added ``__non_callable_proto_members__``,
+    3.13 added ``__firstlineno__`` and ``__static_attributes__``, 3.14 added
+    ``__annotate_func__`` and ``__annotations_cache__``. An allowlist by shape
+    does not have to grow with them, and no protocol in this library requires a
+    private or dunder member.
+    """
+    cached = getattr(protocol, "__protocol_attrs__", None)
+    if isinstance(cached, (set, frozenset)):
+        return set(cached)
+    members: set[str] = set()
+    for base in protocol.__mro__:
+        if base in (object, Protocol, Generic):
+            continue
+        names = (*getattr(base, "__annotations__", {}), *vars(base))
+        members.update(name for name in names if not name.startswith("_"))
+    return members
+
+
+def wrap_into_half_open(
+    values: FloatArray,
+    *,
+    lower: float,
+    upper: float,
+) -> FloatArray:
+    """Reduce values into ``[lower, upper)`` without the ``np.mod`` endpoint leak.
+
+    ``np.mod(-1e-17, 1.0)`` rounds to exactly ``1.0``, so the plain modulo can
+    return the excluded upper endpoint for inputs a rounding error below
+    ``lower``. Every periodic coordinate in the library is reduced through this
+    helper so that the documented half-open bounds hold exactly.
+    """
+    width = upper - lower
+    reduced = lower + np.mod(values - lower, width)
+    return cast(FloatArray, np.where(reduced >= upper, lower, reduced))
 
 
 def _as_array(value: ArrayLike, *, name: str) -> np.ndarray[tuple[int, ...], np.dtype[np.generic]]:

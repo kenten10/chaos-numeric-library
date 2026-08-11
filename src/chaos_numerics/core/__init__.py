@@ -1,5 +1,6 @@
 """Shared protocols, types, results, metadata, and diagnostics."""
 
+from chaos_numerics.core._payload import AnyArray, ArrayPayload
 from chaos_numerics.core.exceptions import (
     ChaosNumericsError,
     ChaosNumericsWarning,
@@ -17,6 +18,7 @@ from chaos_numerics.core.protocols import (
     LinearOperatorLike,
     Partition,
     QuantumMap,
+    SerializableResult,
 )
 from chaos_numerics.core.results import AnalysisResult, EigenstateResult, Spectrum, Trajectory
 from chaos_numerics.core.types import (
@@ -38,7 +40,9 @@ from chaos_numerics.core.types import (
 
 __all__ = [
     "AnalysisResult",
+    "AnyArray",
     "ArrayLike",
+    "ArrayPayload",
     "BatchShape",
     "BoolArray",
     "ChaosNumericsError",
@@ -66,6 +70,7 @@ __all__ = [
     "QuantumMap",
     "QuantumState",
     "ReproducibilityWarning",
+    "SerializableResult",
     "Shape",
     "Spectrum",
     "StateShape",
