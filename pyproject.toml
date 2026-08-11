@@ -102,7 +102,7 @@ exclude_also = [
 ]
 
 [tool.ruff]
-required-version = "==0.15.14"
+required-version = "==0.16.2"
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]

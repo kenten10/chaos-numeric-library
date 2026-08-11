@@ -14,7 +14,7 @@ from chaos_numerics.core._validation import as_float_array
 from chaos_numerics.core.exceptions import ValidationError
 from chaos_numerics.core.types import FloatArray
 
-JsonScalar: TypeAlias = None | bool | int | float | str
+JsonScalar: TypeAlias = bool | int | float | str | None
 JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | MappingProxyType[str, "JsonValue"]
 
 
