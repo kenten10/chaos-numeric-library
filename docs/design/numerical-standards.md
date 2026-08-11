@@ -385,6 +385,36 @@ rounding are therefore stated as multiples of `numpy.finfo(numpy.float64).eps`, 
 as absolute constants; an absolute constant below a few `eps` pins a NumPy build
 rather than the library.
 
+#### What this means when writing a test
+
+Four assertions in this suite passed on the development machine and failed in CI,
+each because they pinned a property of one machine rather than of the library. The
+patterns are worth naming, because a green local run is not evidence against any of
+them:
+
+- **A reduction whose order is an implementation choice is not bit-reproducible.**
+  Changing `chunk_size` changes the shape of the array handed to the matrix
+  product, so BLAS blocks it differently and the sums land differently. Compare
+  such results at rounding level, and bound the difference against the **peak** of
+  the array rather than per element: a Husimi tail cell at `1e-10` beside a peak at
+  `30` moves by an absolute `7e-18`, which is a relative `1e-11`, so a per-element
+  `rtol` rejects a correct result. Genuine memoization -- same inputs, cache on
+  versus off -- *is* bit-exact and should be asserted with `assert_array_equal`.
+- **`argmax` over a tie is decided by the implementation.** A coherent state
+  centered at `0.25` on a 64-cell midpoint grid sits exactly between two cells
+  that hold bit-identical values. Assert that the peak lies within one cell of the
+  requested point, or first assert that there is no tie
+  (`sum(values >= values.max() - eps) == 1`) and only then pin the cell.
+- **A finite-time quantity from a single chaotic orbit is not reproducible at all.**
+  Rounding differences are amplified by `exp(lambda t)`, so two machines following
+  "the same" orbit have diverged completely within a few hundred steps. Use a
+  phase-space mean over an ensemble and size the tolerance from the spread across
+  orbit sets. Where an exact answer is wanted, pin a quantity that does not depend
+  on the orbit, as `tests/test_lyapunov.py` does by using a fixed point whose
+  Jacobian is constant.
+- **Complex elementwise arithmetic is not reproducible call to call on the floor**,
+  per the paragraphs above.
+
 Seeded reproducibility is unaffected and is asserted at the floor: Lyapunov
 exponents, Ulam matrices, stationary densities, spectral statistics, and sweep child
 seeds all reproduce bit for bit across processes and thread counts on both the

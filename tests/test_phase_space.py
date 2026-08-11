@@ -177,11 +177,17 @@ def test_coherent_state_localization_matches_closed_form(dimension: int) -> None
 def test_husimi_peak_sits_on_the_requested_phase_space_point() -> None:
     """Detect a swapped ``(q, p)`` order or a flipped momentum sign.
 
-    The peak cell of a coherent state centered at ``(0.25, 0.75)`` must be the
-    midpoint cell nearest that point, which for a 64x64 grid is
-    ``(0.2421875, 0.7421875)``. Swapping the axes would report
-    ``(0.7421875, 0.2421875)`` and negating the momentum ``(0.2421875,
-    0.2421875)``.
+    The peak must sit within one cell of the requested centre. It is **not**
+    pinned to a particular cell, because on this grid it cannot be: a 64x64 grid
+    has midpoints at ``(j + 0.5) / 64``, so the requested ``0.25`` falls exactly
+    halfway between ``0.2421875`` and ``0.2578125``, and the two cells hold
+    bit-identical values here. Which one ``argmax`` returns is then decided by the
+    implementation rather than by the physics, and this test previously asserted
+    ``0.2421875`` and failed on the NumPy 1.26 floor, which returned the other one.
+
+    One cell of slack still discriminates what the test is for by a wide margin:
+    swapping the axes would report ``(0.7421875, 0.2421875)`` and negating the
+    momentum ``(0.2421875, 0.2421875)``, both about half a period away.
     """
     result = husimi_distribution(
         coherent_state(dimension=64, position=0.25, momentum=0.75),
@@ -189,8 +195,9 @@ def test_husimi_peak_sits_on_the_requested_phase_space_point() -> None:
     )
 
     peak = np.unravel_index(int(np.argmax(result.values)), result.values.shape)
-    assert float(result.positions[peak[0]]) == pytest.approx(0.2421875, abs=1e-15)
-    assert float(result.momenta[peak[1]]) == pytest.approx(0.7421875, abs=1e-15)
+    spacing = 1.0 / 64.0
+    assert abs(float(result.positions[peak[0]]) - 0.25) <= spacing
+    assert abs(float(result.momenta[peak[1]]) - 0.75) <= spacing
 
 
 def test_localization_measures_for_basis_uniform_and_batch_states() -> None:
@@ -579,11 +586,18 @@ def test_husimi_coherent_grid_cache_does_not_change_a_single_bit() -> None:
 
         # The cache itself: bit-identical, no tolerance.
         np.testing.assert_array_equal(uncached.values, cached.values)
-        # Across chunk sizes: rounding only. Measured worst relative difference
-        # 4.4e-15 on a runner whose BLAS blocks differently from this machine's,
-        # and exactly zero here, so the bound must not be tighter than rounding.
-        np.testing.assert_allclose(uncached.values, reused.values, rtol=1e-13, atol=1e-300)
-        np.testing.assert_allclose(uncached.raw_integral, reused.raw_integral, rtol=1e-13)
+        # Across chunk sizes: rounding only, and bounded against the *peak* rather
+        # than per element. A reduction-order change perturbs each cell by about
+        # eps times the largest term in its own sum, so the far tail of the
+        # distribution -- cells at 1e-10 while the peak is 30 -- moves by a
+        # relative 1e-11 while moving by an absolute 7e-18. A per-element `rtol`
+        # therefore measures the wrong thing and rejected a correct result on the
+        # CI macOS runner. Measured worst absolute difference there 6.6e-18, which
+        # is 2.2e-19 of the peak, and exactly zero on this machine.
+        scale = float(np.max(uncached.values))
+        drift = float(np.max(np.abs(np.asarray(uncached.values) - np.asarray(reused.values))))
+        assert drift <= 1e-13 * scale
+        assert abs(float(uncached.raw_integral) - float(reused.raw_integral)) <= 1e-13 * scale
         # What `chunk_size` really must not do is add a cache entry.
         assert len(phase_space._coherent_cache) == 1
         entry = next(iter(phase_space._coherent_cache.values()))
