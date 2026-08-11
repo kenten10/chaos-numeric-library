@@ -155,6 +155,8 @@ mode raises `ConvergenceError`.
 | Mean-square displacement | Constant velocity and seeded random walk | Deterministic case `rtol=1e-12`; stochastic ensemble mean within `5` estimated standard errors. |
 | Local diffusion exponent, central value | Synthetic power laws over a fixed fit interval | Absolute slope error `<= 5e-3`; result records interval, sample count, and fit residual. |
 | Local diffusion exponent, reported error | 200 realizations of two known exponents: a unit random walk (`alpha = 1`) and fractional Brownian motion with `H = 0.75` (`alpha = 1.5`) | Ratio of the true estimator spread to the reported uncertainty in `[0.5, 2]`, and at most `20%` of realizations further than two reported errors from the truth. Measured `0.95`-`1.19` and `3.0%`-`11.5%`. |
+| Normalized autocorrelation, reported error | 300 realizations of AR(1) with `phi = 0.9`, 2000 steps, `batch = 16`, whose autocorrelation is exactly `rho(k) = phi**k` | Ratio in `[0.5, 2]` and at most `20%` beyond two reported errors. Measured `0.995`-`1.022` and `6.0%`-`9.7%` over lags `1`-`20`, and exactly zero at lag zero where the normalized value is identically one. Dividing the unnormalized standard error by the ensemble lag-zero value instead measured `0.107`-`0.743` over the same lags and reported `2.4e-2` for the constant at lag zero. |
+| Number variance / spectral rigidity, reported error | 300 Poisson spectra at `N = 256`, `samples = 1024`, against the grand mean | Ratio in `[0.5, 2]` and at most `20%` beyond two reported errors, **as a function of the arc count** `N // L` rather than of `L`. Number variance measured `1.08`/`1.30`/`1.40`/`1.64`/`2.49` with tails `7.3%`/`14.7%`/`20.7%`/`28.0%`/`51.3%` at `128`/`25`/`12`/`6`/`3` arcs; spectral rigidity measured `1.02`/`1.16`/`1.37`/`1.48`/`1.63` with tails `7.0%`/`12.7%`/`18.7%`/`19.7%`/`28.7%` at the same counts. Below `8` arcs and `4` arcs respectively the estimator warns. |
 | Mean-square displacement, reported error | 200-400 realizations of unit random walks of 2000 steps, whose MSD is exactly `<dx**2> = t` | Ratio of the true estimator spread to the reported uncertainty in `[0.5, 2]`, and at most `20%` of realizations further than two reported errors from the truth. Measured `0.98`-`1.13` and `4.5%`-`9.5%` for the batch standard error over lags `1`-`500` at `batch = 16`. The retired time-origin standard error measured `1.05`-`20.87` and `4.8%`-`90.0%` over the same lags and fails at every lag from `5` upwards. |
 | Periodic orbit | `||F^period(x) - x||_2` using wrapped displacement | `<= max(user_tol, 1e-10)` for a successful result. |
 | Monodromy matrix | Product of independently evaluated Jacobians | `rtol=1e-10`, `atol=1e-12` for low periods covered by v0.1. |
@@ -183,6 +185,19 @@ for the exponent, over per-trajectory curves for the MSD and the autocorrelation
 together with a `NumericalWarning`, because one curve carries no information about
 the spread of its own value. Every result records what its error means in
 `metadata.parameters["error_semantics"]`.
+
+The band is a property of the estimator, not of the library: one deliberate
+exception is recorded rather than hidden. `spectral_form_factor(bootstrap=...)`
+returns a resampling diagnostic that is **not** calibrated and cannot be, because
+`K(tau)` is a coherent sum that does not self-average and resampling levels
+destroys the correlations that set its value. Its spread is nearly independent of
+`tau` while the true scatter falls to zero with `K`, so the overstatement grows
+without bound as `tau -> 0`: measured over 150 Haar-CUE spectra at `N = 128` it is
+`1.5x` the true scatter at `tau = 1.0`, `4.4x` at `0.3`, `12.8x` at `0.1` and
+`24.2x` at `0.05`. It always errs high, so it cannot manufacture a detection, and
+the parameter is opt-in, so the number is still returned -- but the call warns, and
+the reason is in `metadata.parameters["error_semantics"]` as well, because a caller
+who reads `curve.uncertainty` in code reads neither prose nor a docstring.
 
 `mean_square_displacement` used to escape that contract by reporting the scatter
 over the time origins of one trajectory, which is the same failure one level down:

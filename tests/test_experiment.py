@@ -796,19 +796,22 @@ def test_spectral_curve_round_trips_with_and_without_an_error_estimate(tmp_path:
     assert set(metadata["result"]["arrays"]) == {"x", "values"}
 
     bootstrapped_output = tmp_path / "bootstrapped"
-    bootstrapped = run_experiment(
-        _quantum_experiment(
-            "spectral_form_factor",
-            dimension=64,
-            boundary_phases=list(BLOCH_PHASES[0]),
-            symmetry_sector=CUE_SECTOR,
-            times=[0.1, 0.5, 1.0, 1.5],
-            window="hann",
-            connected=False,
-            bootstrap=16,
-        ),
-        output=bootstrapped_output,
-    )
+    # The bootstrap path warns that its spread is a resampling diagnostic and not an
+    # error bar on K(tau); what is under test here is that the arrays persist.
+    with pytest.warns(NumericalWarning, match="resampling diagnostic"):
+        bootstrapped = run_experiment(
+            _quantum_experiment(
+                "spectral_form_factor",
+                dimension=64,
+                boundary_phases=list(BLOCH_PHASES[0]),
+                symmetry_sector=CUE_SECTOR,
+                times=[0.1, 0.5, 1.0, 1.5],
+                window="hann",
+                connected=False,
+                bootstrap=16,
+            ),
+            output=bootstrapped_output,
+        )
     assert isinstance(bootstrapped.result, SpectralCurve)
     assert bootstrapped.result.uncertainty is not None
     assert bootstrapped.result.variance is not None
@@ -916,8 +919,11 @@ def test_number_variance_sweep_child_seeds_are_bit_reproducible(tmp_path: Path) 
         seed=4242,
     )
     grid = cartesian_grid(unfold_method=["mean", "polynomial"])
-    first = run_sweep(experiment, parameters=grid, output=tmp_path / "first")
-    second = run_sweep(experiment, parameters=reversed(grid), output=tmp_path / "second")
+    # L=8 on 63 levels leaves seven arcs, below the eight the batch-means error bar
+    # needs, so each run warns; the seeds reaching the RNG are what is under test.
+    with pytest.warns(NumericalWarning, match="leave fewer than 8 independent windows"):
+        first = run_sweep(experiment, parameters=grid, output=tmp_path / "first")
+        second = run_sweep(experiment, parameters=reversed(grid), output=tmp_path / "second")
 
     assert first.succeeded == second.succeeded == 2
     first_by_id = {run.job_id: run for run in first.runs}

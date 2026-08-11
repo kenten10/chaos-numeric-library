@@ -110,6 +110,87 @@ _MEHTA_PANEL_CHUNK = 4096
 #: spectra. Calibration against 150 Haar-CUE spectra at ``N=128``: the bootstrap
 #: standard deviation is 3.7x the true realization scatter at ``tau=0.3``, 1.5x
 #: at ``tau=1.0`` and 1.6x at ``tau=1.5``.
+_MINIMUM_RESOLVED_ARCS = 8
+"""Fewest side-by-side windows whose batch means still calibrate the error.
+
+The batch-means estimator treats the ``N // L`` arcs of the circle as independent,
+but a window that starts inside one arc reaches into the next, so the block means
+correlate once the arcs are few. Measured on 300 Poisson spectra at ``N = 256`` with
+``samples = 1024``, against the grand mean as truth:
+
+======== ======= ============ ==========
+arcs     ratio   ``|z| > 2``  verdict
+======== ======= ============ ==========
+128      1.08    7.3%         inside
+51       1.21    13.0%        inside
+25       1.30    14.7%        inside
+17       1.35    16.0%        inside
+12       1.40    20.7%        **fails**
+10       1.49    25.3%        fails
+6        1.64    28.0%        fails
+3        2.49    51.3%        fails
+======== ======= ============ ==========
+
+The binding criterion is the tail, not the ratio: the ratio stays well inside
+``[0.5, 2]`` down to 4 arcs while the tail has already left 20%.
+
+Eight is chosen rather than sixteen deliberately. Twelve arcs sits at 20.7%, a
+hair over the criterion, and warning there would fire on ordinary work -- ``L = 10``
+on 128 levels is twelve arcs, and that is a standard random-matrix comparison this
+library's own notebook makes. So the band from 8 to 16 arcs is left quiet and
+recorded as marginal (tail 15% to 21%), and the warning is reserved for the region
+where the estimator is unambiguously wrong: at 6 arcs the tail is 28% and at 3 it
+is 51%. ``metadata.parameters["effective_samples"]`` always reports the arc count,
+so a caller who wants to hold a stricter line can."""
+
+_MINIMUM_RESOLVED_RIGIDITY_ARCS = 4
+"""The same threshold for :func:`spectral_rigidity`, which degrades far more slowly.
+
+``Delta_3`` integrates ``Sigma^2`` across the window, and that smoothing makes its
+per-window values much less variable, so its batch means stay usable at arc counts
+where the number variance has already failed. Measured on the same 300 Poisson
+spectra at ``N = 256``:
+
+======== ======= ============ ==========
+arcs     ratio   ``|z| > 2``  verdict
+======== ======= ============ ==========
+25       1.02    7.0%         inside
+17       1.12    10.7%        inside
+12       1.16    12.7%        inside
+6        1.37    18.7%        inside
+4        1.48    19.7%        inside (just)
+3        1.63    28.7%        **fails**
+======== ======= ============ ==========
+
+Four rather than sixteen, because that is what the measurement says. Sharing one
+constant between the two estimators would have meant either warning about rigidity
+results that are fine or staying silent about number variances that are not."""
+
+_COARSE_ARCS_WARNING = (
+    "{count} window length(s) up to {longest} leave fewer than {minimum} independent "
+    "windows on {dimension} levels, so the batch-means error bar is no longer "
+    "calibrated: adjacent arcs overlap the same window and their block means "
+    "correlate. Measured on Poisson spectra at N=256, the fraction of realizations "
+    "further than two reported errors from the truth grows past the 20% acceptance "
+    "criterion below that arc count, while the ratio of true to reported spread stays "
+    "deceptively close to one. The values themselves are unaffected; only the "
+    "uncertainty is. Use shorter lengths, more levels, or the scatter of an ensemble "
+    "of spectra"
+)
+
+_SFF_BOOTSTRAP_WARNING = (
+    "spectral_form_factor bootstrap uncertainty is a resampling diagnostic of one "
+    "spectrum, not an error bar on K(tau). K is a coherent sum that does not "
+    "self-average, and resampling levels with replacement destroys the level-level "
+    "correlations that set its value, so the bootstrap spread is nearly independent "
+    "of tau while the true scatter falls to zero with K: measured over 150 Haar-CUE "
+    "spectra at N=128 it is 1.5x the true scatter at tau=1.0 but 12.8x at tau=0.1 "
+    "and 24.2x at tau=0.05, and it grows without bound as tau approaches zero. It "
+    "always errs high, so it cannot manufacture a detection, but below tau of about "
+    "0.3 it is wide enough to hide any departure from RMT. Average K over an "
+    "ensemble of spectra and take the scatter of the members for a real uncertainty"
+)
+
 _SFF_ERROR_SEMANTICS: dict[bool, str] = {
     False: "none; no uncertainty is reported without bootstrap",
     True: (
@@ -212,15 +293,35 @@ def spectral_form_factor(
     level-level correlations that set the value of ``K``, so the returned
     ``uncertainty`` is a resampling diagnostic of one spectrum and nothing more.
 
-    Measured against the true scatter of 150 Haar-CUE spectra at ``N=128``, the
-    bootstrap standard deviation is **3.7x too large at ``tau=0.3``** (1.222
-    against a true 0.326), **1.5x at ``tau=1.0``** (1.658 against 1.110) and
-    **1.6x at ``tau=1.5``** (1.658 against 1.053). It errs high, so it will not
-    manufacture a spurious detection, but it is wide enough to hide a real
-    departure from RMT and must not be quoted as an error bar on the physics.
-    ``metadata.parameters["error_semantics"]`` says the same thing in machine-
-    readable form. Average over an ensemble and take the scatter of the members
-    if you need a real uncertainty on ``K(tau)``.
+    **How badly it errs depends on ``tau``, and it is unbounded as ``tau -> 0``.**
+    The bootstrap standard deviation is nearly independent of ``tau`` -- resampling
+    destroys the rigidity, so the replicates behave Poisson-like everywhere -- while
+    the true scatter falls to zero with ``K`` itself. Measured against the true
+    scatter of 150 Haar-CUE spectra at ``N=128``, ``connected=True``,
+    ``bootstrap=100``:
+
+    ========= ========== ========== ========== ==========
+    ``tau``   mean ``K`` true sd    boot sd    ratio
+    ========= ========== ========== ========== ==========
+    0.05      0.0449     0.0430     1.0385     **24.2x**
+    0.10      0.0897     0.0819     1.0515     **12.8x**
+    0.20      0.2285     0.2160     1.1726     5.4x
+    0.30      0.3092     0.2830     1.2486     4.4x
+    0.50      0.4819     0.4455     1.3341     3.0x
+    1.00      0.9656     1.0361     1.5938     1.5x
+    1.50      1.0207     0.9214     1.6625     1.8x
+    2.00      0.9874     1.0252     1.6438     1.6x
+    ========= ========== ========== ========== ==========
+
+    So the often-quoted "a factor of a few" holds only for ``tau`` of order one and
+    above. It always errs high, so it will not manufacture a spurious detection,
+    but below ``tau ~ 0.3`` it is wide enough to hide any departure from RMT
+    whatever. Calling with ``bootstrap`` therefore emits
+    :class:`~chaos_numerics.core.NumericalWarning`, and
+    ``metadata.parameters["error_semantics"]`` says the same thing in
+    machine-readable form, because a caller who reads ``curve.uncertainty`` in code
+    never sees this paragraph. Average over an ensemble and take the scatter of the
+    members if you need a real uncertainty on ``K(tau)``.
     """
     levels, sector = _unfolded_levels(spectrum)
     tau = _nonnegative_1d(times, name="times")
@@ -265,6 +366,7 @@ def spectral_form_factor(
     uncertainty: FloatArray | None = None
     variance: FloatArray | None = None
     if resamples:
+        python_warnings.warn(_SFF_BOOTSTRAP_WARNING, NumericalWarning, stacklevel=2)
         rng = np.random.default_rng(random_seed)
         replicates = np.empty((resamples, tau.size), dtype=np.float64)
         for index in range(resamples):
@@ -387,6 +489,7 @@ def number_variance(
     rng = np.random.default_rng(random_seed) if resamples else None
     effective: list[int] = []
     unresolved: list[float] = []
+    coarse: list[float] = []
     for index, length in enumerate(windows):
         ends = np.searchsorted(doubled, origins + length, side="left")
         counts = ends - starts
@@ -400,6 +503,8 @@ def number_variance(
         effective.append(blocks)
         if blocks < 2:
             unresolved.append(float(length))
+        elif blocks < _MINIMUM_RESOLVED_ARCS:
+            coarse.append(float(length))
         estimator_variance[index] = _batch_means_variance(
             squared,
             blocks=blocks,
@@ -419,6 +524,15 @@ def number_variance(
         diagnostics.append(
             Diagnostic("number-variance-unresolved-error", message, category="spectral")
         )
+        python_warnings.warn(message, NumericalWarning, stacklevel=2)
+    if coarse:
+        message = _COARSE_ARCS_WARNING.format(
+            count=len(coarse),
+            longest=max(coarse),
+            minimum=_MINIMUM_RESOLVED_ARCS,
+            dimension=dimension,
+        )
+        diagnostics.append(Diagnostic("number-variance-coarse-error", message, category="spectral"))
         python_warnings.warn(message, NumericalWarning, stacklevel=2)
     metadata = _number_variance_metadata(
         sector=sector,
@@ -570,6 +684,7 @@ def spectral_rigidity(
     rng = np.random.default_rng(random_seed) if resamples else None
     effective: list[int] = []
     unresolved: list[float] = []
+    coarse: list[float] = []
     for index, length in enumerate(windows):
         per_window = _rigidity_per_window(
             length=float(length),
@@ -587,6 +702,8 @@ def spectral_rigidity(
         effective.append(blocks)
         if blocks < 2:
             unresolved.append(float(length))
+        elif blocks < _MINIMUM_RESOLVED_RIGIDITY_ARCS:
+            coarse.append(float(length))
         estimator_variance[index] = _batch_means_variance(
             per_window,
             blocks=blocks,
@@ -604,6 +721,17 @@ def spectral_rigidity(
         )
         diagnostics.append(
             Diagnostic("spectral-rigidity-unresolved-error", message, category="spectral")
+        )
+        python_warnings.warn(message, NumericalWarning, stacklevel=2)
+    if coarse:
+        message = _COARSE_ARCS_WARNING.format(
+            count=len(coarse),
+            longest=max(coarse),
+            minimum=_MINIMUM_RESOLVED_RIGIDITY_ARCS,
+            dimension=dimension,
+        )
+        diagnostics.append(
+            Diagnostic("spectral-rigidity-coarse-error", message, category="spectral")
         )
         python_warnings.warn(message, NumericalWarning, stacklevel=2)
     metadata = _rigidity_metadata(
