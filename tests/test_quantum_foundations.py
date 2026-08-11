@@ -475,24 +475,57 @@ def test_public_type_aliases_are_reachable_from_the_quantum_namespace() -> None:
     assert get_args(quantum.CatMatrix) == (tuple[int, int], tuple[int, int])
 
 
-def _classical_lyapunov(kick_strength: float, *, steps: int = 5_000) -> float:
-    """Return one chaotic-orbit standard-map exponent, ignoring its own convergence.
+def _classical_lyapunov(
+    kick_strength: float, *, orbits: int, steps: int = 5_000, seed: int = 20260811
+) -> float:
+    """Return the phase-space mean standard-map exponent over ``orbits`` orbits.
+
+    **A single orbit cannot be pinned across platforms, and trying to do so is
+    what broke this test in CI.** The standard map is chaotic, so any difference
+    in rounding -- a different libm ``sin``, a different SIMD path -- is amplified
+    by ``exp(lambda * n)`` and the orbit decorrelates within a few hundred steps.
+    After 5000 steps two machines started from the same initial condition are
+    following entirely different orbits, and their finite-time exponents differ by
+    far more than any rounding tolerance: the earlier single-orbit version of this
+    helper returned 1.00604 on the development machine and 0.98407 on the CI Linux
+    and macOS runners, a 2.2% gap that broke an ``abs=0.02`` bound on six of seven
+    test jobs while passing on Windows by luck.
+
+    Only an ensemble mean is reproducible, and only to its own sampling error, so
+    the caller gets a mean and the assertions below are sized from the measured
+    spread across orbit sets rather than from rounding. Measured over eight seeds:
+
+    ============ ========== =================== ==============================
+    ``K``        ``orbits`` mean spread          note
+    ============ ========== =================== ==============================
+    ``5.0``      32         ``0.9416``-``0.9807`` mixed phase space; 1.2% of
+                                                orbits sit in islands with
+                                                ``lambda`` near zero, so the
+                                                mean converges slowly
+    ``10.0``     24         ``1.6182``-``1.6268`` globally chaotic, no islands
+    ============ ========== =================== ==============================
 
     ``largest_lyapunov_exponent`` reports a ``ConvergenceWarning`` whenever its
-    two equal-length windows still disagree, which at these run lengths depends
-    on the orbit rather than on anything the OTOC tests are about. The warning
-    is silenced here and nowhere else; the classical estimator has its own
-    convergence tests in ``tests/test_lyapunov.py``.
+    two equal-length windows still disagree, which at these run lengths depends on
+    the orbit rather than on anything the OTOC tests are about. The warning is
+    silenced here and nowhere else; the classical estimator has its own
+    convergence tests in ``tests/test_lyapunov.py``, which pin an exponent at a
+    *fixed point* where the Jacobian is constant and the answer is therefore
+    exact and orbit-independent -- the pattern this helper should have followed.
     """
+    generator = np.random.default_rng(seed)
+    total = 0.0
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ConvergenceWarning)
-        result = largest_lyapunov_exponent(
-            StandardMap(kick_strength=kick_strength),
-            initial_state=(0.11, 0.23),
-            steps=steps,
-            transient=500,
-        )
-    return float(np.ravel(result.values)[-1])
+        for _ in range(orbits):
+            result = largest_lyapunov_exponent(
+                StandardMap(kick_strength=kick_strength),
+                initial_state=tuple(generator.random(2)),
+                steps=steps,
+                transient=500,
+            )
+            total += float(np.ravel(result.values)[-1])
+    return total / orbits
 
 
 def _log_slope(
@@ -737,20 +770,26 @@ def test_otoc_growth_rate_is_not_twice_the_classical_lyapunov_exponent() -> None
     assert rates[5.0] == pytest.approx(2.1186, abs=1e-3)
     assert rates[10.0] == pytest.approx(1.7794, abs=1e-3)
 
-    # Single chaotic orbit, 5_000 steps: measured 1.0060 at K = 5 and 1.6243 at
-    # K = 10, both within 4% of the 16-orbit phase-space averages quoted in the
-    # docstring (0.9688 and 1.6211).
-    lyapunov_five = _classical_lyapunov(5.0)
-    lyapunov_ten = _classical_lyapunov(10.0)
-    assert lyapunov_five == pytest.approx(1.006, abs=0.02)
-    assert lyapunov_ten == pytest.approx(1.624, abs=0.02)
+    # Phase-space means, not single orbits -- see ``_classical_lyapunov`` for why a
+    # single orbit is not reproducible across platforms. The bounds below are the
+    # measured spread over eight independent orbit sets, widened a little, and they
+    # are ranges rather than ``approx`` values because the K = 5 mean is genuinely
+    # slow to converge: its phase space is mixed, so a few orbits land in islands.
+    lyapunov_five = _classical_lyapunov(5.0, orbits=32)
+    lyapunov_ten = _classical_lyapunov(10.0, orbits=24)
+    assert 0.92 <= lyapunov_five <= 1.00  # measured 0.9416-0.9807
+    assert lyapunov_ten == pytest.approx(1.622, abs=0.02)  # measured 1.6182-1.6268
 
     ratio_five = rates[5.0] / (2.0 * lyapunov_five)
     ratio_ten = rates[10.0] / (2.0 * lyapunov_ten)
-    # Measured 1.053 and 0.548: the prediction is right to a factor of two at
-    # K = 5 and wrong by a factor of two at K = 10, so it is not an identity.
-    assert ratio_five == pytest.approx(1.053, abs=0.03)
-    assert ratio_ten == pytest.approx(0.548, abs=0.02)
+    # The point of the test: the prediction is right to within about 10% at K = 5
+    # and wrong by nearly a factor of two at K = 10, so it is not an identity. The
+    # ratio *crossing* one is the reproducible statement; neither endpoint is a
+    # constant of the model. Measured over eight orbit sets: ratio_five
+    # 1.0802-1.1250, ratio_ten 0.5469-0.5498, and their quotient at worst 1.970.
+    assert 1.02 <= ratio_five <= 1.20
+    assert 0.52 <= ratio_ten <= 0.58
+    assert ratio_five > 1.0 > ratio_ten
     assert ratio_five / ratio_ten > 1.5
 
 

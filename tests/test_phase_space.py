@@ -546,8 +546,18 @@ def test_husimi_coherent_grid_cache_does_not_change_a_single_bit() -> None:
 
     ``_CACHE_BUDGET_BYTES = 0`` disables it, which is exactly the pre-cache code
     path, and the two are compared with ``array_equal`` rather than a tolerance.
-    A different ``chunk_size`` must also reuse the same entry, because the grid
-    is assembled row by row and the block width cannot move any number.
+    That is the invariant the cache has to satisfy and it is asserted exactly.
+
+    ``chunk_size`` is a different matter. It must reuse the same cache *entry*,
+    which is asserted on the cache itself, but it does **not** leave the numbers
+    bit-identical: the block width is the shape of the array handed to the matrix
+    product, so changing it changes BLAS's blocking and therefore the order of a
+    floating-point reduction. This test used to assert bit-equality across chunk
+    sizes and passed on the development machine while failing on the CI Linux and
+    macOS runners at a relative 1e-15, which is what a different BLAS kernel
+    looks like. ``numerical-standards.md`` says bitwise identity is not promised
+    across BLAS implementations or reduction orders; the comparison across chunk
+    sizes is therefore made at rounding level.
     """
     state = coherent_state(dimension=32, position=0.3, momentum=0.7)
     phases = BoundaryPhases(0.25, 0.13)
@@ -567,9 +577,14 @@ def test_husimi_coherent_grid_cache_does_not_change_a_single_bit() -> None:
             state, grid_shape=(24, 20), boundary_phases=phases, chunk_size=256
         )
 
+        # The cache itself: bit-identical, no tolerance.
         np.testing.assert_array_equal(uncached.values, cached.values)
-        np.testing.assert_array_equal(uncached.values, reused.values)
-        np.testing.assert_array_equal(uncached.raw_integral, reused.raw_integral)
+        # Across chunk sizes: rounding only. Measured worst relative difference
+        # 4.4e-15 on a runner whose BLAS blocks differently from this machine's,
+        # and exactly zero here, so the bound must not be tighter than rounding.
+        np.testing.assert_allclose(uncached.values, reused.values, rtol=1e-13, atol=1e-300)
+        np.testing.assert_allclose(uncached.raw_integral, reused.raw_integral, rtol=1e-13)
+        # What `chunk_size` really must not do is add a cache entry.
         assert len(phase_space._coherent_cache) == 1
         entry = next(iter(phase_space._coherent_cache.values()))
         # A writable cache entry would let one caller corrupt the next one's grid.
