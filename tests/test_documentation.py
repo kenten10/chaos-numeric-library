@@ -62,14 +62,15 @@ def test_markdown_python_blocks_were_discovered() -> None:
 
 
 _PUBLIC_SURFACE = re.compile(
-    r"from chaos_numerics\.(?P<module>\w+) import \(\n(?P<names>.*?)\n\)",
+    r"from chaos_numerics(?:\.(?P<module>\w+))? import \(\n(?P<names>.*?)\n\)",
     re.DOTALL,
 )
 
 
 @pytest.mark.parametrize(
     "module",
-    ["core", "classical", "operators", "quantum", "spectral", "experiment"],
+    ["", "core", "classical", "operators", "quantum", "spectral", "experiment"],
+    ids=["top-level", "core", "classical", "operators", "quantum", "spectral", "experiment"],
 )
 def test_public_api_document_lists_every_exported_name(module: str) -> None:
     """`public-api.md` sections 4.3 and 4.4 must enumerate the whole surface.
@@ -80,19 +81,26 @@ def test_public_api_document_lists_every_exported_name(module: str) -> None:
     and a reader who treats the listing as the checklist it claims to be then never
     learns the name exists. Both `HusimiResult` and `WignerResult` went missing
     that way, along with every name added in this release.
+
+    The top-level block in section 4.2 is covered too, because the first version of
+    this test checked only the six subpackage listings and section 4.2 quietly
+    dropped `CylinderKickedRotor` and `LogisticMap` behind it -- a guard with a hole
+    in exactly the shape of the thing it was added to catch.
     """
     text = (REPOSITORY_ROOT / "docs" / "design" / "public-api.md").read_text(encoding="utf-8")
     listed: set[str] = set()
     for match in _PUBLIC_SURFACE.finditer(text):
-        if match.group("module") != module:
+        if (match.group("module") or "") != module:
             continue
         listed |= {line.strip().rstrip(",") for line in match.group("names").splitlines()}
-    assert listed, f"public-api.md has no import block for chaos_numerics.{module}"
+    dotted = f"chaos_numerics.{module}" if module else "chaos_numerics"
+    assert listed, f"public-api.md has no import block for {dotted}"
 
-    package = importlib.import_module(f"chaos_numerics.{module}")
-    exported = set(package.__all__)
+    package = importlib.import_module(dotted)
+    # ``__version__`` is re-exported on its own line rather than inside the block.
+    exported = set(package.__all__) - {"__version__"}
     assert not exported - listed, (
-        f"chaos_numerics.{module} exports {sorted(exported - listed)} "
+        f"{dotted} exports {sorted(exported - listed)} "
         "without listing them in docs/design/public-api.md"
     )
 

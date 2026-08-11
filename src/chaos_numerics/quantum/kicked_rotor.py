@@ -165,9 +165,16 @@ class KickedRotor:
         exactly why the mistake survives a test written at the default twist.
 
         :meth:`to_position_basis` is the exact inverse. Round trips are unitary
-        to ``2.5e-16`` and the momentum norm matches the position norm to
-        ``4.5e-16``, measured over ``N`` in ``{7, 8, 15, 16, 63, 64, 65, 128,
-        257}`` and three twists.
+        to ``2 eps`` and the momentum norm matches the position norm to ``2 eps``,
+        where ``eps`` is ``numpy.finfo(numpy.float64).eps``, measured over ``N`` in
+        ``{7, 8, 15, 16, 63, 64, 65, 128, 257}`` and three twists.
+
+        Stated in units of ``eps`` rather than as an absolute constant on purpose.
+        The quantity is a worst case over *random* states, so it depends on the
+        sample: the same grid gives ``1.1 eps`` to ``1.6 eps`` for the round trip
+        as the seed and the number of states per case vary, and quoting one run's
+        maximum as though it were a bound is how ``2.5e-16`` came to be written
+        here and then failed to reproduce.
 
         **The two rotor classes store opposite bases**, so the same method name
         consumes a different input in each:
@@ -414,10 +421,17 @@ class CylinderKickedRotor:
     profiles is dominated by the widest state in the spectrum and has no decay
     length at all.
 
-    The transport helpers in :mod:`chaos_numerics.classical` use the momentum
-    convention ``<Delta P^2> = 2 D_P t`` instead, so converting requires
-    ``D = 2 D_P / hbar**2``. Mixing the two conventions misses ``ell`` by a
-    factor of two, which is larger than the accuracy of the estimate itself.
+    Beware the factor of two when a diffusion coefficient comes from elsewhere.
+    :mod:`chaos_numerics.classical` fixes no convention of its own --
+    :func:`~chaos_numerics.classical.mean_square_displacement` returns the raw
+    curve ``<Delta P^2>(t)`` and
+    :func:`~chaos_numerics.classical.local_diffusion_exponent` its log-log slope,
+    so the coefficient is whatever the caller extracts. The literature is split
+    between ``<Delta P^2> = 2 D t`` and ``<Delta n^2> = D t``, and ``ell`` above is
+    written in the second. Converting from the first also divides by ``hbar**2``.
+    Getting this wrong misses ``ell`` by a factor of two, which is larger than the
+    accuracy of the estimate itself; the reproduction notebook makes the same
+    conversion explicit for that reason.
     """
 
     dimension: int

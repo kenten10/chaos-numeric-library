@@ -51,7 +51,8 @@ All notable changes to this project will be documented here. The format follows
   a ramp-and-plateau plot needs an ensemble average over Bloch phases, and that
   ensemble is a parameter sweep, yet the sweep could not run it. Measured over twelve
   phases at `N = 128`, the sweep's ensemble mean gives a ramp slope of 1.08 and a
-  plateau of 0.98, four times closer to the CUE reference than any single member.
+  plateau of 0.98, about four times closer to the CUE reference than a typical
+  single member and roughly twice as close as the best one.
   `boundary_phases` accepts a scalar, a two-element list, or the mapping that
   `BoundaryPhases.to_dict()` produces, so a persisted parameter set feeds straight
   back into the next sweep.
@@ -70,9 +71,12 @@ All notable changes to this project will be documented here. The format follows
   the normalization and the shape together.
 - `wigner_distribution` and `WignerResult`. Marginals reproduce the position and
   momentum probabilities to `3e-16`, the distribution sums to one, and unlike the
-  Husimi distribution it goes negative, which is the point: a two-lobe cat state
-  reaches `-3.5e-2` against a peak of `+3.8e-2` while its Husimi minimum stays at
-  `+3e-12`.
+  Husimi distribution it goes negative, which is the point: the cat state
+  `coherent(0.25, 0.5) + coherent(0.75, 0.5)` at `N = 32` reaches `-2.51e-2` against
+  a peak of `+3.05e-2` while its Husimi minimum stays at `+7.1e-12`. (This entry
+  previously quoted `-3.5e-2`, `+3.8e-2` and `+3e-12`, which match no state or
+  dimension the library documents; the authoritative table is in
+  `docs/design/quantum-phase-space.md`.)
 - `momentum_numbers`, `to_momentum_basis`, and `to_position_basis` on both rotors.
   The twisted transform was private, and its own docstring warned the convention is
   easy to get wrong, so a momentum-space figure was not reachable through the public

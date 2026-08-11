@@ -177,9 +177,11 @@ def loschmidt_echo(
     ``M(0)`` is ``1`` by construction. It is *bit-exactly* ``1.0`` when the
     initial state has exactly representable amplitudes -- a basis state, for
     instance -- and otherwise equals ``1`` to the rounding of one normalization,
-    measured worst error ``2.2e-16`` over 200 random states at ``N = 128``. Two
-    identical models give ``M(t) = 1`` to ``2.7e-14`` over 50 steps, and
-    ``M(t)`` may exceed ``1`` by up to ``1.8e-15``. The values are deliberately
+    measured worst error ``2.2e-15`` over 200 random states at ``N = 128``
+    (``1.8e-15`` to ``2.2e-15`` across four seeds). Two identical models give
+    ``M(t) = 1`` to ``1.3e-14`` over 50 steps, and ``M(t)`` may exceed ``1`` by up
+    to ``1.3e-14`` (measured ``8.9e-15`` to ``1.3e-14`` at ``K = 1``, ``5`` and
+    ``10``, ``N = 256``). The values are deliberately
     **not** clipped into ``[0, 1]``: a clipped diagnostic hides exactly the
     numerical drift it should be reporting.
 

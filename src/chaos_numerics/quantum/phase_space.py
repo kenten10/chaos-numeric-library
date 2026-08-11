@@ -233,8 +233,10 @@ class WignerResult:
         Unlike :attr:`HusimiResult.integral` there is no cell area: the stored
         values are dimensionless weights, not a density, and the sum is an exact
         identity rather than the result of a quadrature. Measured departure from
-        1 is at most ``2.2e-16``, so this is a check on the summation and on
-        nothing else.
+        1 is at most ``2 eps``, with ``eps`` being
+        ``numpy.finfo(numpy.float64).eps``, so this is a check on the summation and
+        on nothing else. In units of ``eps`` because the worst case is taken over
+        random states and therefore moves with the sample.
         """
         result = np.sum(self.values, axis=(-2, -1))
         return float(result) if result.ndim == 0 else np.asarray(result, dtype=np.float64)
@@ -454,8 +456,11 @@ def wigner_distribution(
     density of the same states on the same grid stays positive (minimum
     ``2.2e-5``, ``7.1e-12``, ``3.3e-25``).
 
-    A position or momentum basis state has ``W >= 0`` exactly
-    (:attr:`WignerResult.negative_weight` is ``0.0``), and a coherent state's
+    A position basis state has ``W >= 0`` exactly
+    (:attr:`WignerResult.negative_weight` is bit-exactly ``0.0``). A *momentum*
+    basis state has it only to rounding -- measured ``1.1e-16`` at ``N = 8`` and
+    ``1.7e-16`` at ``N = 32`` -- because it reaches the position basis through the
+    twisted transform rather than being a basis vector there. A coherent state's
     negative weight shrinks as ``hbar_eff = 2 pi / N`` does: ``0.19``, ``0.13``,
     ``0.092`` at ``N = 16, 32, 64``. Some negativity at finite ``N`` is
     therefore expected even for the most classical states available, and

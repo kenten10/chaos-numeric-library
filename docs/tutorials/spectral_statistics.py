@@ -6,10 +6,12 @@ its Bloch phases select the symmetry class, so one model reproduces Poisson, COE
 and CUE statistics depending on which symmetries survive.
 
 The last block is the control that makes the comparison interpretable. Feeding
-genuine Haar-distributed unitaries through the same functions recovers the CUE
-reference within its standard error, so the residual percent-level shortfall for
+genuine Haar-distributed unitaries through the same functions lands on the CUE
+reference to about one standard error -- this seeded run prints -1.3 of them, which
+is ordinary scatter and not a bias -- so the residual percent-level shortfall for
 the rotor belongs to the model at finite `hbar_eff = 2 * pi / N`, not to this
-pipeline.
+pipeline. The script states the deviation in standard errors precisely so the
+reader can judge that rather than take the claim on trust.
 """
 
 import numpy as np
