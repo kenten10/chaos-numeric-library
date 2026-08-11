@@ -93,7 +93,7 @@ trajectory = Trajectory(
 )
 
 print(trajectory)  # compact: arrays are not expanded
-states = trajectory.states          # read-only view owned by the result
+states = trajectory.states  # read-only view owned by the result
 payload = trajectory.array_payload()  # independent writable copies for storage
 ```
 
@@ -134,13 +134,13 @@ from chaos_numerics.classical import CatMap, lyapunov_spectrum
 result = lyapunov_spectrum(
     CatMap(),
     np.array([0.1, 0.2]),
-    steps=20_000,   # the time average converges as 1/sqrt(steps)
+    steps=20_000,  # the time average converges as 1/sqrt(steps)
     transient=100,
     reorthogonalization_interval=4,
     history_interval=5,
 )
 
-print(result.values)                   # [+0.9624, -0.9624] = +/- log((3+sqrt(5))/2)
+print(result.values)  # [+0.9624, -0.9624] = +/- log((3+sqrt(5))/2)
 print(result.metadata.convergence.converged)
 ```
 
@@ -179,7 +179,7 @@ def momentum(states):
 # number that is up to 21x too small. `per_trajectory` keeps the MSD curves
 # separate so the slope fit can report the spread across them.
 ensemble = iterate(StandardMap(2.0), np.random.default_rng(7).random((32, 2)), steps=4_000)
-series = np.asarray(ensemble.states)[..., 0]   # one scalar observable per member
+series = np.asarray(ensemble.states)[..., 0]  # one scalar observable per member
 correlation = autocorrelation(series, max_lag=100, demean=True)
 curves = mean_square_displacement(
     ensemble, observable=momentum, max_lag=200, unwrap=True, periods=1.0, per_trajectory=True
@@ -277,7 +277,7 @@ unfolded = unfold(prepared, method="mean")
 ratios = adjacent_gap_ratios(unfolded, degeneracy="drop")
 histogram = spacing_distribution(unfolded, bins=30, value_range=(0.0, 4.0))
 
-print(ratios.values.mean())   # near 0.5996, the CUE value
+print(ratios.values.mean())  # near 0.5996, the CUE value
 ```
 
 Preparation wraps to `[0, 2*pi)`, sorts, and retains the gap across the circular
