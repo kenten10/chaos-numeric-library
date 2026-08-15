@@ -50,6 +50,25 @@ def _plain(call: object, /, *args: object, **kwargs: object) -> AnalysisResult:
     return result
 
 
+def dropping_a_frozen_member(call: object, /, *args: object, **kwargs: object) -> AnalysisResult:
+    """Call an estimator on the shared ``ensemble`` fixture with ``normalize=True``.
+
+    ``ensemble(5, ...)`` launches its members along ``linspace(0.01, 0.99, 5)``,
+    which includes ``0.5`` -- exactly the fixed point of the standard map at these
+    parameters. That member's momentum never moves, so once demeaned its lag-zero
+    value is exactly zero and it has no normalized curve of its own. The ensemble
+    curve is unaffected, because the ensemble lag-zero value is not zero; only the
+    error bar narrows to the four members that carry a curve, and the estimator
+    says so. Capturing that here keeps the degenerate path covered rather than
+    hiding it behind a fixture change.
+    """
+    assert callable(call)
+    with pytest.warns(NumericalWarning, match="lag-zero value is zero"):
+        result = call(*args, **kwargs)
+    assert isinstance(result, AnalysisResult)
+    return result
+
+
 def single(call: object, /, *args: object, **kwargs: object) -> AnalysisResult:
     """Run a transport estimator on one trajectory and capture its warning.
 
@@ -704,7 +723,13 @@ def test_fft_autocorrelation_matches_the_direct_reference(
     states = ensemble(batch, steps=count - 1).states
     data = states[0] if batch == 1 else states
     common = {"observable": momentum, "max_lag": max_lag, "demean": demean, "normalize": normalize}
-    run = single if batch == 1 else _plain
+    if batch == 1:
+        run = single
+    elif normalize and demean:
+        # The fixture contains a member on the fixed point; see the helper.
+        run = dropping_a_frozen_member
+    else:
+        run = _plain
     fast = run(autocorrelation, data, method="fft", **common)
     slow = run(autocorrelation, data, method="direct", **common)
 
@@ -855,3 +880,64 @@ def test_transport_and_periodic_parameters_are_validated() -> None:
         local_diffusion_exponent(floats([0.0, 1.0, 2.0]), fit_start=1, fit_stop=4)
     with pytest.raises(ValidationError, match="period must be positive"):
         find_periodic_orbits(CatMap(), floats([0.0, 0.0]), period=0)
+
+
+def test_normalized_autocorrelation_error_is_calibrated_on_an_ar1_ensemble() -> None:
+    """The normalized error must come from per-trajectory normalized curves.
+
+    Dividing the unnormalized standard error by the *ensemble* lag-zero value
+    ignores that the denominator is itself estimated and varies between
+    trajectories. That was wrong in both directions at once. Measured here on
+    AR(1) with ``phi = 0.9``, ``batch = 16``, 2000 steps, 300 realizations, against
+    the exact truth ``rho(k) = phi**k``:
+
+    ========  ==================  =================
+    lag       before (true/rep)   after (true/rep)
+    ========  ==================  =================
+    0         0 (rep 0.024 for    exactly 0
+              a constant 1)
+    1         0.107               1.022
+    2         0.200               1.021
+    5         0.444               1.009
+    10        0.743               0.995
+    ========  ==================  =================
+
+    Lag zero is the sharpest case: every trajectory's normalized value is exactly
+    1, so the only correct error there is exactly zero, and the old path reported
+    2.4e-2. The criterion is section 4.3 of the numerical standards -- ratio in
+    ``[0.5, 2]`` and at most 20% of realizations beyond two reported errors.
+    """
+    phi, batch, steps, realizations = 0.9, 16, 2000, 60
+    lags = (0, 1, 2, 5, 10)
+    generator = np.random.default_rng(11)
+    values, errors = [], []
+    for _ in range(realizations):
+        series = np.zeros((batch, steps))
+        noise = generator.normal(size=(batch, steps))
+        for step in range(1, steps):
+            series[:, step] = phi * series[:, step - 1] + noise[:, step]
+        result = autocorrelation(series, max_lag=max(lags), demean=True, normalize=True)
+        assert result.uncertainty is not None
+        values.append(np.asarray(result.values))
+        errors.append(np.asarray(result.uncertainty))
+    observed, reported = np.stack(values), np.stack(errors)
+
+    # Lag zero is identically one, so its error must be identically zero.
+    np.testing.assert_array_equal(observed[:, 0], np.ones(realizations))
+    assert float(np.max(reported[:, 0])) == 0.0
+
+    for lag in lags[1:]:
+        truth = phi**lag
+        ratio = float(observed[:, lag].std(ddof=1)) / float(reported[:, lag].mean())
+        outside = float(np.mean(np.abs((observed[:, lag] - truth) / reported[:, lag]) > 2.0))
+        assert 0.5 <= ratio <= 2.0, (lag, ratio)
+        assert outside <= 0.20, (lag, outside)
+
+    assert (
+        autocorrelation(
+            np.zeros((batch, steps)) + generator.normal(size=(batch, steps)),
+            max_lag=4,
+            normalize=True,
+        ).metadata.parameters["error_semantics"]
+        == "standard error of the mean over trajectories, each normalized by its own lag-zero value"
+    )

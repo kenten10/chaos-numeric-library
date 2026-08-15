@@ -707,3 +707,26 @@ def test_measured_gap_ratio_histograms_track_their_own_surmise(
     assert deviation(label) <= 0.16
     assert deviation(other) > 0.3
     assert deviation("poisson") > 1.0
+
+
+def test_mean_unfolding_anchors_the_first_level_at_zero() -> None:
+    """``values`` is a public array and its origin is part of the convention.
+
+    ``unfold(method="mean")`` subtracts the first phase before dividing by the mean
+    spacing, so ``values[0]`` is exactly zero and ``values`` counts mean spacings
+    from the first level. Nothing pinned that: every consumer in the library is
+    shift-invariant -- the form factor centres the levels itself, the number
+    variance and the rigidity wrap onto a circle -- so dropping the subtraction
+    changed a documented public array while the whole suite stayed green.
+    """
+    for offset in (0.0, 1.0, 3.5):
+        phases = np.mod(offset + np.arange(12) * 2.0 * np.pi / 12.0, 2.0 * np.pi)
+        prepared = prepare_eigenphases(
+            np.sort(phases), symmetry_sector="rigid", degeneracy_tolerance=0.0
+        )
+        result = unfold(prepared, method="mean")
+
+        assert float(result.values[0]) == 0.0
+        # And the scale really is the mean spacing: a rigid spectrum unfolds to the
+        # integers, which also fixes that the divisor is 2*pi/count.
+        np.testing.assert_allclose(result.values, np.arange(12.0), rtol=0.0, atol=1e-12)

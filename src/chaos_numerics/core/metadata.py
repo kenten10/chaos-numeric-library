@@ -10,7 +10,12 @@ from typing import Any, TypeAlias
 
 import numpy as np
 
-from chaos_numerics.core._validation import as_float_array
+from chaos_numerics.core._validation import (
+    as_float_array,
+    validate_finite_float,
+    validate_nonnegative_int,
+    validate_trimmed_string,
+)
 from chaos_numerics.core.exceptions import ValidationError
 from chaos_numerics.core.types import FloatArray
 
@@ -28,9 +33,7 @@ class Diagnostic:
 
     def __post_init__(self) -> None:
         for field_name in ("code", "message", "category"):
-            value = getattr(self, field_name)
-            if not value or value.strip() != value:
-                raise ValidationError(f"diagnostic {field_name} must be a non-empty trimmed string")
+            validate_trimmed_string(getattr(self, field_name), name=f"diagnostic {field_name}")
 
     def to_dict(self) -> dict[str, str]:
         """Return a JSON-compatible representation."""
@@ -49,25 +52,24 @@ class ConvergenceInfo:
     reason: str | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.iterations, bool) or self.iterations < 0:
-            raise ValidationError(
-                f"convergence iterations must be a non-negative integer; got {self.iterations!r}"
-            )
-        object.__setattr__(self, "iterations", int(self.iterations))
+        object.__setattr__(
+            self,
+            "iterations",
+            validate_nonnegative_int(self.iterations, name="convergence iterations"),
+        )
 
         for field_name in ("residual", "tolerance"):
             value = getattr(self, field_name)
             if value is None:
                 continue
-            numeric = float(value)
-            if not math.isfinite(numeric) or numeric < 0.0:
-                raise ValidationError(
-                    f"convergence {field_name} must be finite and non-negative; got {value!r}"
-                )
-            object.__setattr__(self, field_name, numeric)
+            object.__setattr__(
+                self,
+                field_name,
+                validate_finite_float(value, name=f"convergence {field_name}", minimum=0.0),
+            )
 
-        if self.reason is not None and (not self.reason or self.reason.strip() != self.reason):
-            raise ValidationError("convergence reason must be a non-empty trimmed string")
+        if self.reason is not None:
+            validate_trimmed_string(self.reason, name="convergence reason")
         if self.history is not None:
             object.__setattr__(
                 self,
@@ -148,10 +150,8 @@ class ExperimentMetadata:
             ):
                 raise ValidationError(f"seed must be an integer or None; got {self.seed!r}")
             object.__setattr__(self, "seed", int(self.seed))
-        if self.git_commit is not None and (
-            not self.git_commit or self.git_commit.strip() != self.git_commit
-        ):
-            raise ValidationError("git_commit must be a non-empty trimmed string")
+        if self.git_commit is not None:
+            validate_trimmed_string(self.git_commit, name="git_commit")
 
         warnings = tuple(self.warnings)
         if not all(isinstance(item, Diagnostic) for item in warnings):

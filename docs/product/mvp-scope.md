@@ -251,7 +251,14 @@ times = np.linspace(0.0, 2.0, 101)
 prepared = prepare_eigenphases(raw_phases, symmetry_sector="parity and time reversal broken")
 unfolded = unfold(prepared, method="mean")
 ratios = adjacent_gap_ratios(unfolded)
-form_factor = spectral_form_factor(unfolded, times, window="hann", bootstrap=500, seed=7)
+form_factor = spectral_form_factor(unfolded, times, window="hann")
+
+# `bootstrap=` is available but deliberately warns: K(tau) is a coherent sum that
+# does not self-average, so resampling one spectrum's levels measures the
+# resampling, not the realization scatter. Its spread is nearly independent of tau
+# while the true scatter falls to zero with K, so the overstatement grows without
+# bound as tau -> 0 -- measured 1.5x at tau=1 but 24x at tau=0.05. Average over an
+# ensemble of Bloch phases and take the scatter of the members instead.
 ```
 
 ### 7.5 Reproducible parameter sweep

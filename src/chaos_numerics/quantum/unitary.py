@@ -63,9 +63,10 @@ _SYMMETRY_SECTORS: tuple[str, ...] = get_args(SymmetrySector)
 _INVOLUTION_TOLERANCE: Final[float] = 1e-12
 """Bound on ``||S**2 - I||_F / sqrt(N)`` accepted by :func:`desymmetrize`.
 
-The shipped symmetries are exact 0/1 permutation matrices whose defect is
-identically zero, so this only leaves room for a caller-assembled involution
-that rounds at the last bits.
+The shipped symmetries are signed permutation matrices -- entries in
+``{-1, 0, 1}`` -- whose defect is identically zero either way, since ``(+-1)**2``
+is exactly ``1``. So this only leaves room for a caller-assembled involution that
+rounds at the last bits.
 """
 
 
@@ -536,11 +537,18 @@ def _symmetry_defects(model: QuantumMap, dense: ComplexArray) -> dict[str, float
 def _commutator(dense: ComplexArray, symmetry: ComplexArray) -> ComplexArray:
     """Return ``[U, S]`` using index permutation when ``S`` is a permutation.
 
-    Every symmetry operator shipped with the library is a 0/1 permutation
-    matrix, for which ``U @ S`` and ``S @ U`` are exact column and row
-    permutations. Taking that route turns two ``O(N**3)`` GEMMs into ``O(N**2)``
-    gathers and is bit-for-bit identical, because the skipped products are
-    exact zeros. Anything else falls back to the general matrix products.
+    ``U @ S`` and ``S @ U`` are exact column and row permutations when ``S`` is a
+        0/1 permutation matrix. Taking that route turns two ``O(N**3)`` GEMMs into
+        ``O(N**2)`` gathers and is bit-for-bit identical, because the skipped products
+        are exact zeros. Anything else falls back to the general matrix products.
+
+        Most shipped symmetries qualify, but not all: the ``KickedRotor`` parity at
+        ``BoundaryPhases(0, 1/2)`` is a *signed* permutation, with entries in
+        ``{-1, 0, 1}``, and takes the GEMM route. That is correct rather than
+        unfortunate -- the reflection at that twist genuinely needs the sign, which is
+        why it commutes exactly where a bare permutation does not (defect ``6.8e-14``
+        against ``0.249``) -- and it is worth naming here because the fast path is
+        sometimes described as covering everything the library ships.
     """
     row_to_column = _permutation_of(symmetry)
     if row_to_column is None:

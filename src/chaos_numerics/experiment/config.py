@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from chaos_numerics.core import ExperimentMetadata, ValidationError
+from chaos_numerics.core._validation import validate_trimmed_string
 
 
 def _validated_mapping(value: Mapping[str, object], *, name: str) -> MappingProxyType[str, object]:
@@ -38,9 +39,7 @@ class Experiment:
 
     def __post_init__(self) -> None:
         for name in ("model", "analysis"):
-            value = getattr(self, name)
-            if not value or value.strip() != value:
-                raise ValidationError(f"{name} must be a non-empty trimmed string")
+            validate_trimmed_string(getattr(self, name), name=name)
         if self.seed is not None and (
             isinstance(self.seed, bool) or not isinstance(self.seed, int)
         ):

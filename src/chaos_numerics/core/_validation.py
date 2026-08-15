@@ -126,6 +126,57 @@ def validate_positive_int(value: IntegerLike, *, name: str) -> int:
     return result
 
 
+def validate_trimmed_string(value: object, *, name: str) -> str:
+    """Validate a non-empty string carrying no leading or trailing whitespace.
+
+    The obvious spelling, ``if not value or value.strip() != value``, short-circuits
+    only for *falsy* values, so any truthy non-string reaches ``.strip()`` and leaves
+    with an :class:`AttributeError`. That matters beyond tidiness:
+    :class:`~chaos_numerics.core.ValidationError` is documented as catchable through
+    ``except ValueError``, and an ``AttributeError`` is caught by neither that nor
+    :class:`~chaos_numerics.core.ChaosNumericsError`, so a caller following the
+    documented pattern sees the exception escape. Six constructors shared the
+    mistake, which is why the check lives here now instead of in each of them.
+    """
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be a non-empty trimmed string; got {value!r}")
+    if not value or value.strip() != value:
+        raise ValidationError(f"{name} must be a non-empty trimmed string; got {value!r}")
+    return value
+
+
+def validate_nonnegative_int(value: object, *, name: str) -> int:
+    """Validate a non-negative built-in or NumPy integer, excluding booleans.
+
+    Rejects a float outright rather than truncating it. ``iterations=2.5`` used to be
+    accepted and silently stored as ``2``, which is a wrong answer where an error
+    belongs, and a string reached the comparison and left with a ``TypeError``.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValidationError(f"{name} must be a non-negative integer; got {value!r}")
+    result = int(value)
+    if result < 0:
+        raise ValidationError(f"{name} must be non-negative; got {result}")
+    return result
+
+
+def validate_finite_float(value: object, *, name: str, minimum: float | None = None) -> float:
+    """Coerce to ``float`` and require finiteness, naming the field on failure.
+
+    ``float(value)`` alone raises a bare :class:`ValueError` or :class:`TypeError`
+    whose message names neither the field nor the caller, so the field name is
+    attached here instead.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.number)):
+        raise ValidationError(f"{name} must be a real number; got {value!r}")
+    numeric = float(value)
+    if not np.isfinite(numeric):
+        raise ValidationError(f"{name} must be finite; got {value!r}")
+    if minimum is not None and numeric < minimum:
+        raise ValidationError(f"{name} must be at least {minimum}; got {numeric}")
+    return numeric
+
+
 def validate_protocol(value: object, protocol: type, *, name: str) -> None:
     """Reject objects that do not structurally implement a runtime protocol.
 

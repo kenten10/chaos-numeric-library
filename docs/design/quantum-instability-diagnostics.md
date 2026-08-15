@@ -166,6 +166,15 @@ inherits the matrix-free and FFT routes and their `norm_tolerance` audit, and it
 memory is the two histories: `2 * (steps + 1) * N` complex numbers, 16 MiB at
 `N = 512`, `steps = 1000`.
 
+`otoc` requires a unitary model, to the same `1e-12` defect tolerance
+`eigenstates` uses, and raises `NumericalError` otherwise. The recursion inverts
+the propagator by taking its adjoint, which is the inverse only for a unitary
+operator. This guard was missing: a model whose dense form is `0.9 * I` (defect
+0.19) returned the smooth decaying correlator `[2.0, 1.312, 0.861, 0.565]` with no
+exception and no warning, while `eigenstates` and `evolve` both refused the same
+object. The defect was recorded in the metadata, which only helps a caller who
+thinks to read it.
+
 `otoc` has only a dense path, because `A(t)` is a matrix and there is nothing for
 a matrix-free algorithm to act on. Each step is four `O(N**3)` products and
 `dense_limit` guards materializing the model exactly as it does elsewhere.

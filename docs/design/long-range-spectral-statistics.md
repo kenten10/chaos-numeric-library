@@ -444,7 +444,9 @@ surface as a message about curve values rather than about the ensemble; the
 reference raises a `ValidationError` naming `tau=1` instead. The cost is that a
 grid like `np.linspace(0, 2, 5)` is refused, which is a real inconvenience and is
 why the message says to step over `tau=1`. The curve is perfectly ordinary
-arbitrarily close by (4.0 at `tau = 1 +/- 1e-6`).
+arbitrarily close by (`3.954` at `tau = 1 +/- 1e-6`; the divergence is
+logarithmic, so it climbs very slowly and 4.0 is only reached far nearer the
+pole).
 
 Invalid `statistic` and `ensemble` values are rejected with a message that lists
 the accepted values, enumerated from the `Literal` aliases so that the message
@@ -477,9 +479,11 @@ single choice: a prefactor edited without its rate breaks both integrals. The
 implementation carries the closed forms in one `_WIGNER_SURMISE` table keyed by
 canonical ensemble rather than as a branch per index, and a test integrates each
 curve on a fine grid to `rtol=1e-6` rather than trusting the algebra. The modes
-move right and up with beta — `0.5642`, `0.8862`, `0.9400` at heights `0.7602`,
+move right and up with beta — `0.7979`, `0.8862`, `0.9400` at heights `0.7602`,
 `0.9368`, `1.2253` — which is what makes a measured histogram able to tell them
-apart at all.
+apart at all. The beta=1 mode is `sqrt(2/pi)`, from `d/ds[(pi s/2)exp(-pi s^2/4)] = 0`;
+this line read `0.5642 = 1/sqrt(pi)` until a review measured it, and the heights
+were right throughout, so it was the constant that was wrong and not the code.
 
 The name is load-bearing: these are the exact spacing densities of a **2x2**
 matrix, carried over to the bulk by the usual abuse, not the large-`N`

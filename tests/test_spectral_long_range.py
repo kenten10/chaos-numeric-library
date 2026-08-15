@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import itertools
 import pickle
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Iterator
 
 import numpy as np
 import pytest
@@ -32,6 +34,28 @@ from chaos_numerics.spectral import (
 )
 
 _EULER_MASCHERONI = 0.5772156649015329
+
+
+@contextlib.contextmanager
+def coarse_arcs_expected() -> Iterator[None]:
+    """Accept the coarse-arc warning in a test that is about values, not error bars.
+
+    ``number_variance`` and ``spectral_rigidity`` warn once a window length leaves
+    too few side-by-side arcs for their batch-means error bar to be calibrated --
+    eight and four respectively, both measured. Many tests in this file check the
+    *values* against a closed form on a deliberately tiny synthetic spectrum, where
+    a handful of arcs is unavoidable and the warning is simply true. Swallowing it
+    here keeps ``filterwarnings = ["error"]`` meaningful everywhere else, and using
+    a named helper rather than a bare filter keeps it visible which tests are in
+    that position.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*leave fewer than \d+ independent windows.*",
+            category=NumericalWarning,
+        )
+        yield
 
 
 def _equally_spaced(count: int) -> PreparedEigenphases:
@@ -116,20 +140,12 @@ def test_connected_sff_bootstrap_is_seeded_and_returns_plot_ready_uncertainty() 
     prepared = prepare_eigenphases(np.linspace(0.0, 2.0 * np.pi, 65)[:-1], symmetry_sector="all")
     times = np.linspace(0.0, 1.5, 12)
 
-    first = spectral_form_factor(
-        prepared,
-        times,
-        window="hann",
-        bootstrap=32,
-        seed=7,
-    )
-    second = spectral_form_factor(
-        prepared,
-        times,
-        window="hann",
-        bootstrap=32,
-        seed=7,
-    )
+    # Every bootstrap call warns that its spread is a resampling diagnostic rather
+    # than an error bar; the point here is that the numbers are seeded, not silent.
+    with pytest.warns(NumericalWarning, match="resampling diagnostic"):
+        first = spectral_form_factor(prepared, times, window="hann", bootstrap=32, seed=7)
+    with pytest.warns(NumericalWarning, match="resampling diagnostic"):
+        second = spectral_form_factor(prepared, times, window="hann", bootstrap=32, seed=7)
 
     np.testing.assert_array_equal(first.values, second.values)
     np.testing.assert_array_equal(first.uncertainty, second.uncertainty)
@@ -173,8 +189,12 @@ def test_number_variance_matches_direct_circular_window_counting() -> None:
     # L=4 on five levels leaves room for a single independent window, so the
     # scatter of the estimator cannot be resolved from one spectrum and the
     # function says so.
-    with pytest.warns(NumericalWarning, match="fewer than two independent windows"):
+    # Two diagnostics fire together here: L=4 leaves a single window (unresolved)
+    # and L=2 leaves four, below the eight the batch-means bar needs (coarse).
+    with pytest.warns(NumericalWarning) as caught:
         result = number_variance(unfolded, lengths, samples=samples)
+    messages = [str(item.message) for item in caught]
+    assert any("fewer than two independent windows" in text for text in messages)
 
     levels = np.sort(np.mod(unfolded.values, unfolded.count))
     origins = (np.arange(samples) + 0.5) * unfolded.count / samples
@@ -203,7 +223,8 @@ def test_number_variance_matches_the_exact_equally_spaced_result(samples: int) -
     """
     prepared = _equally_spaced(32)
 
-    result = number_variance(prepared, _EXACT_LENGTHS, samples=samples)
+    with coarse_arcs_expected():
+        result = number_variance(prepared, _EXACT_LENGTHS, samples=samples)
 
     np.testing.assert_allclose(result.values, _EXACT_VARIANCE, atol=1e-12)
 
@@ -213,7 +234,8 @@ def test_number_variance_finite_size_correction_rescales_the_exact_result() -> N
     lengths = _EXACT_LENGTHS[:-1]
     expected = _EXACT_VARIANCE[:-1] / (1.0 - lengths / 32.0)
 
-    corrected = number_variance(prepared, lengths, samples=128, finite_size_correction=True)
+    with coarse_arcs_expected():
+        corrected = number_variance(prepared, lengths, samples=128, finite_size_correction=True)
 
     np.testing.assert_allclose(corrected.values, expected, atol=1e-12)
     assert corrected.metadata.parameters["finite_size_factor"] == "1/(1-L/N)"
@@ -351,7 +373,8 @@ def test_number_variance_metadata_publishes_effective_samples_and_error_semantic
     prepared = _equally_spaced(64)
     lengths = np.asarray([0.0, 1.0, 4.0, 10.0])
 
-    result = number_variance(prepared, lengths, samples=256)
+    with coarse_arcs_expected():
+        result = number_variance(prepared, lengths, samples=256)
 
     # min(samples, floor(N/L)), and the full origin count where L counts nothing.
     assert result.metadata.parameters["effective_samples"] == (256, 64, 16, 6)
@@ -364,7 +387,8 @@ def test_number_variance_metadata_publishes_effective_samples_and_error_semantic
     assert "batch-means" in semantics
     assert "NOT sqrt(var/samples)" in semantics
 
-    booted = number_variance(prepared, lengths, samples=256, bootstrap=8, seed=3)
+    with coarse_arcs_expected():
+        booted = number_variance(prepared, lengths, samples=256, bootstrap=8, seed=3)
     boot_semantics = booted.metadata.parameters["error_semantics"]
     assert isinstance(boot_semantics, str)
     assert "block-bootstrap" in boot_semantics
@@ -481,7 +505,8 @@ def test_spectral_rigidity_matches_an_independent_window_integration() -> None:
     origins = (np.arange(samples, dtype=np.float64) + 0.5) * dimension / samples
 
     for length in (0.7, 1.0, 2.5, 6.0, 11.0):
-        curve = spectral_rigidity(prepared, [length], samples=samples)
+        with coarse_arcs_expected():
+            curve = spectral_rigidity(prepared, [length], samples=samples)
         expected = float(
             np.mean([_naive_window_rigidity(tiled, float(origin), length) for origin in origins])
         )
@@ -811,11 +836,18 @@ def test_number_variance_warns_when_a_single_window_fills_the_spectrum() -> None
         degeneracy_tolerance=0.0,
     )
 
-    with pytest.warns(NumericalWarning, match="fewer than two independent windows"):
+    with pytest.warns(NumericalWarning) as caught:
         result = number_variance(prepared, [4.0, 12.0], samples=256)
+    messages = [str(item.message) for item in caught]
+    # L=12 leaves one window, L=4 leaves four: one of each diagnostic.
+    assert any("fewer than two independent windows" in text for text in messages)
+    assert any("leave fewer than 8 independent windows" in text for text in messages)
 
     assert result.metadata.parameters["effective_samples"] == (4, 1)
-    assert [item.code for item in result.metadata.warnings] == ["number-variance-unresolved-error"]
+    assert [item.code for item in result.metadata.warnings] == [
+        "number-variance-unresolved-error",
+        "number-variance-coarse-error",
+    ]
     assert result.uncertainty is not None
     # The single-window spread bounds the error from above rather than dividing it
     # down by an origin count that measures nothing.
@@ -836,9 +868,10 @@ def test_form_factor_bootstrap_variance_is_the_unbiased_two_sample_estimate() ->
     seed = 6
     prepared = _equally_spaced(dimension)
 
-    result = spectral_form_factor(
-        prepared, times, window="none", connected=False, bootstrap=2, seed=seed
-    )
+    with pytest.warns(NumericalWarning, match="resampling diagnostic"):
+        result = spectral_form_factor(
+            prepared, times, window="none", connected=False, bootstrap=2, seed=seed
+        )
 
     centered = np.arange(dimension, dtype=np.float64) - (dimension - 1) / 2.0
     phases = np.exp(2j * np.pi * np.outer(times, centered))
@@ -960,15 +993,23 @@ def test_form_factor_bootstrap_is_labelled_as_a_resampling_diagnostic() -> None:
     """``K(tau)`` does not self-average, so the bootstrap is not an ensemble error.
 
     Measured against 150 Haar-CUE spectra at ``N=128`` the bootstrap standard
-    deviation is 3.7x the true realization scatter at ``tau=0.3`` and about 1.5x
-    at ``tau>=1``. It errs high, so it cannot fabricate a detection, but it must
-    not be presented as an uncertainty on the physics -- hence the metadata label.
+    deviation is 4.4x the true realization scatter at ``tau=0.3``, about 1.5x at
+    ``tau>=1``, and **24x at ``tau=0.05``** -- it grows without bound as ``tau``
+    approaches zero, because resampling destroys the rigidity and the replicate
+    spread stops depending on ``tau`` while the true scatter falls to zero with
+    ``K``. It errs high, so it cannot fabricate a detection, but it must not be
+    presented as an uncertainty on the physics.
+
+    A metadata label is not enough on its own: a caller who reads
+    ``curve.uncertainty`` in code never reads metadata either. So the call also
+    warns, and that is asserted here alongside the label.
     """
     prepared = _equally_spaced(64)
     times = np.asarray([0.3, 1.0])
 
     plain = spectral_form_factor(prepared, times)
-    booted = spectral_form_factor(prepared, times, bootstrap=16, seed=4)
+    with pytest.warns(NumericalWarning, match="not an error bar on K"):
+        booted = spectral_form_factor(prepared, times, bootstrap=16, seed=4)
 
     assert plain.metadata.parameters["error_semantics"] == (
         "none; no uncertainty is reported without bootstrap"
@@ -1425,8 +1466,10 @@ def test_gse_cluster_function_reproduces_haar_symplectic_long_range_statistics()
     for _ in range(40):
         _, distinct = _haar_symplectic_eigenphases(rng, 64)
         prepared = prepare_eigenphases(distinct, symmetry_sector="cse")
-        variances.append(number_variance(prepared, lengths, samples=1024).values)
-        rigidities.append(spectral_rigidity(prepared, lengths, samples=1024).values)
+        with coarse_arcs_expected():
+            variances.append(number_variance(prepared, lengths, samples=1024).values)
+        with coarse_arcs_expected():
+            rigidities.append(spectral_rigidity(prepared, lengths, samples=1024).values)
     measured_variance = np.mean(variances, axis=0)
     measured_rigidity = np.mean(rigidities, axis=0)
 
@@ -1599,3 +1642,83 @@ def test_spectral_containers_describe_every_array_they_persist(
     assert set(payload) <= set(described), (name, set(payload) - set(described))
     for key, array in payload.items():
         assert described[key] == {"shape": list(array.shape), "dtype": array.dtype.name}
+
+
+def test_batch_means_variance_is_the_unbiased_estimate_over_arcs() -> None:
+    """The **default** error path also needs ``ddof=1`` pinned, not just bootstrap.
+
+    Two white-box tests in this file pin ``ddof=1`` for the two bootstrap paths, but
+    the estimator that ``number_variance`` and ``spectral_rigidity`` report out of
+    the box is the batch-means one, and the only thing constraining it was the
+    0.5-2.0 calibration band. That band cannot see a ``ddof`` flip: with ``b`` arcs
+    the variance changes by ``(b-1)/b``, which is 0.96-0.99 at the arc counts these
+    tests use. So the flip survived.
+
+    Forcing exactly two arcs makes the identity trivial and the difference maximal:
+    ``var([m1, m2], ddof=1) = (m1-m2)**2/2``, so the reported standard error is
+    ``|m1-m2|/2``, whereas ``ddof=0`` would give ``|m1-m2|/(2*sqrt(2))``.
+    """
+    dimension = 32
+    samples = 64
+    length = 12.0
+    rng = np.random.default_rng(5)
+    prepared = prepare_eigenphases(
+        np.sort(rng.uniform(0.0, 2.0 * np.pi, dimension)),
+        symmetry_sector="uniform",
+        degeneracy_tolerance=0.0,
+    )
+
+    with coarse_arcs_expected():
+        result = number_variance(prepared, [length], samples=samples)
+
+    # Same reconstruction as the bootstrap white-box test above.
+    levels = (np.asarray(prepared.phases) - prepared.phases[0]) / (2.0 * np.pi / dimension)
+    canonical = np.sort(np.mod(levels, dimension))
+    doubled = np.concatenate((canonical, canonical + dimension))
+    origins = (np.arange(samples, dtype=np.float64) + 0.5) * dimension / samples
+    starts = np.searchsorted(canonical, origins, side="left")
+    ends = np.searchsorted(doubled, origins + length, side="left")
+    squared = (ends - starts - length) ** 2.0
+    arcs = min(samples, int(dimension // length))
+    assert arcs == 2, "the identity below only holds for two arcs"
+    first, second = (float(part.mean()) for part in np.array_split(squared, arcs))
+
+    assert result.uncertainty is not None
+    expected = abs(first - second) / 2.0
+    assert float(result.uncertainty[0]) == pytest.approx(expected, rel=1e-12)
+    # State what the rejected alternative would have produced, so the margin is visible.
+    assert float(result.uncertainty[0]) != pytest.approx(expected / np.sqrt(2.0), rel=1e-6)
+
+
+def test_hann_connected_background_removes_the_window_sidelobes() -> None:
+    """A perfectly rigid spectrum has no connected fluctuations, in any window.
+
+    The Hann background is ``0.5*N*sinc(N*tau) + 0.25*N*(sinc(N*tau+1) +
+    sinc(N*tau-1))``. Every existing Hann assertion sits where the two sidelobe
+    terms vanish exactly -- ``tau = 0`` and integer ``N*tau`` -- so dropping them
+    left the suite green. An equally spaced comb is the sharpest probe available:
+    its connected form factor must collapse to zero at generic ``tau``, and it only
+    does so if the whole background, sidelobes included, is subtracted.
+
+    Measured: with the sidelobes the residual is at most 7.4e-3; without them it
+    ranges 0.32 to 10.4, three to four orders of magnitude larger.
+    """
+    dimension = 64
+    rigid = unfold(
+        prepare_eigenphases(
+            np.arange(dimension) * 2.0 * np.pi / dimension,
+            symmetry_sector="rigid",
+            degeneracy_tolerance=0.0,
+        ),
+        method="mean",
+    )
+    # Deliberately away from integer ``N*tau``, where the sidelobes are largest.
+    taus = np.asarray([0.3, 0.7, 1.3, 2.4]) / dimension
+
+    connected = np.asarray(spectral_form_factor(rigid, taus, connected=True, window="hann").values)
+
+    assert float(np.max(np.abs(connected))) <= 0.05
+    # The flat window is already covered elsewhere; check it here too so that a
+    # regression in the shared background helper cannot hide in one branch.
+    flat = np.asarray(spectral_form_factor(rigid, taus, connected=True, window="none").values)
+    assert float(np.max(np.abs(flat))) <= 0.05

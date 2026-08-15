@@ -134,8 +134,11 @@ all — the Husimi density is a Gaussian smoothing of the same information and i
 non-negative by construction. For `coherent(0.25, 0.5) + coherent(0.75, 0.5)`,
 `min W` is `-3.98e-2`, `-2.51e-2`, `-1.40e-2` at `N = 16, 32, 64` against peaks
 of `+5.97e-2`, `+3.05e-2`, `+1.54e-2`, while the Husimi minimum on the same grid
-is `2.2e-5`, `7.1e-12`, `3.3e-25`. A basis state has `W >= 0` exactly
-(`negative_weight == 0.0`) and a coherent state's negative weight shrinks with
+is `2.2e-5`, `7.1e-12`, `3.3e-25`. A *position* basis state has `W >= 0` exactly
+(`negative_weight == 0.0` bit-exactly); a momentum basis state has it only to
+rounding, `1.1e-16` at `N = 8` and `1.7e-16` at `N = 32`, because it reaches the
+position basis through the twisted transform. A coherent state's negative weight
+shrinks with
 `hbar_eff`: 0.19, 0.13, 0.092 at `N = 16, 32, 64`. Some negativity at finite `N`
 is therefore expected even for the most classical available state, and
 `negative_weight` is comparable only between states of equal `N`.

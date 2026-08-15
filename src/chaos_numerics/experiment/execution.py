@@ -365,7 +365,7 @@ def _execute_classical(
 
     if analysis in {"iterate", "trajectory"}:
         initial = _as_array_like(values.pop("initial_state", (0.1, 0.2)), name="initial_state")
-        steps = _as_int(values.pop("steps"), name="steps")
+        steps = _as_int(_require_parameter(values, "steps", analysis=analysis), name="steps")
         include_initial = _as_bool(values.pop("include_initial", True), name="include_initial")
         _reject_unused(values)
         return iterate(model, initial, steps=steps, include_initial=include_initial)
@@ -376,7 +376,7 @@ def _execute_classical(
             if analysis == "largest_lyapunov_exponent"
             else lyapunov_spectrum
         )
-        steps = _as_int(values.pop("steps"), name="steps")
+        steps = _as_int(_require_parameter(values, "steps", analysis=analysis), name="steps")
         transient = _as_int(values.pop("transient", 0), name="transient")
         interval = _as_int(
             values.pop("reorthogonalization_interval", 1),
@@ -1252,6 +1252,21 @@ def _as_matrix(value: object) -> tuple[tuple[int, int], tuple[int, int]]:
     if len(rows) != 2 or any(len(row) != 2 for row in rows):
         raise ValidationError("matrix must have shape (2, 2)")
     return ((rows[0][0], rows[0][1]), (rows[1][0], rows[1][1]))
+
+
+def _require_parameter(values: dict[str, object], name: str, *, analysis: str) -> object:
+    """Pop a required analysis parameter, or say which one is missing.
+
+    ``values.pop(name)`` alone raises a bare ``KeyError`` whose message is just the
+    key. Inside :func:`run_sweep` that is persisted as
+    ``{"type": "KeyError", "message": "\'steps\'"}``, which tells whoever reads the
+    manifest nothing about which job or which analysis wanted it. Every other
+    required parameter in this module already fails through a validator; this brings
+    the two that did not into line.
+    """
+    if name not in values:
+        raise ValidationError(f"analysis {analysis!r} requires the parameter {name!r}")
+    return values.pop(name)
 
 
 def _reject_unused(values: Mapping[str, object]) -> None:

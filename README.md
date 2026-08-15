@@ -305,7 +305,7 @@ unfolded = unfold(prepare_eigenphases(eigenstates(rotor).eigenphases, symmetry_s
 
 times = np.linspace(0.0, 2.0, 101)
 lengths = np.linspace(0.0, 8.0, 41)
-sff = spectral_form_factor(unfolded, times, window="hann", bootstrap=100, seed=7)
+sff = spectral_form_factor(unfolded, times, window="hann")
 variance = number_variance(unfolded, lengths, samples=4096)
 cue_sff = rmt_reference("spectral_form_factor", "cue", times)
 cue_variance = rmt_reference("number_variance", "cue", lengths)
@@ -315,14 +315,21 @@ A single spectrum does not self-average: the form factor of one realization
 fluctuates by order one about the RMT curve. Published ramp-and-plateau figures
 average over an ensemble of spectra (for the kicked rotor, over Bloch phases).
 The `bootstrap` argument estimates the resampling error of one spectrum and is
-not a substitute for that ensemble average.
+not a substitute for that ensemble average, so it warns when used. How far it is
+from the realization scatter depends on `tau` and grows without bound as `tau`
+approaches zero: measured against 150 Haar-CUE spectra at `N = 128` it is 1.5x too
+large at `tau = 1.0`, 4.4x at `0.3`, and 24x at `0.05`. It always errs high, so it
+cannot manufacture a detection, but below `tau` of about 0.3 it is wide enough to
+hide any departure from RMT.
 
 That ensemble is a parameter sweep, so it belongs in `run_sweep` rather than in a
 hand-written loop. `cartesian_grid(boundary_phases=[...])` over the `kicked_rotor`
 model with the `spectral_form_factor` analysis produces one persisted `SpectralCurve`
 per phase, and averaging them recovers the CUE ramp and plateau: measured over twelve
 phases at `N = 128`, the ramp slope came to 1.08 and the plateau to 0.98, and the
-ensemble mean sat four times closer to the reference than any single member.
+ensemble mean sat about four times closer to the reference than a *typical* single
+member, and roughly twice as close as the best one -- measured RMS 0.25 for the
+mean against 0.57 to 0.99 across the members.
 
 `spectral_rigidity` adds the Dyson-Mehta `Delta_3(L)`, computed by solving the
 in-window least squares in closed form; its reference curve follows from the number
@@ -452,7 +459,10 @@ gap = spectral_gap(spectrum)
 
 print(spectrum.eigenvalues, spectrum.residuals)
 print(density.values.sum(), gap.values[0])
-# The Cat map preserves Lebesgue measure, so density.values is uniform at 1/256.
+# The Cat map preserves Lebesgue measure, so the exact invariant density is the
+# uniform 1/256. The Ulam estimate reproduces that *on average* -- the mean is
+# 1/256 by normalization alone -- while individual cells scatter around it by up
+# to 17.5% here, which is the Monte Carlo noise of 256 samples per cell.
 ```
 
 Run `python examples/cat_ulam_convergence.py --seed 7` for a reproducible Cat-map
